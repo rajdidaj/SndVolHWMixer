@@ -33,3 +33,12 @@
 
 # VS garbage
 .vs\*
+*.ipch
+*.VC.db
+*.suo
+*.log
+*.idb
+*.pdb
+*.tlog
+*.lastbuildstate
+*.ilk
