@@ -1,0 +1,8 @@
+﻿  SndVolHWMixer.cpp
+y:\src\sndvolhwmixer\win\sndvolhwmixer\sndvolhwmixer.cpp(158): warning C4267: 'argument': conversion from 'size_t' to 'int', possible loss of data
+y:\src\sndvolhwmixer\win\sndvolhwmixer\sndvolhwmixer.cpp(147): warning C4101: 'str': unreferenced local variable
+y:\src\sndvolhwmixer\win\sndvolhwmixer\sndvolhwmixer.cpp(454): warning C4244: '=': conversion from 'double' to 'uint8_t', possible loss of data
+y:\src\sndvolhwmixer\win\sndvolhwmixer\sndvolhwmixer.cpp(490): warning C4244: '=': conversion from 'double' to 'uint8_t', possible loss of data
+y:\src\sndvolhwmixer\win\sndvolhwmixer\sndvolhwmixer.cpp(484): warning C4101: 'numconv': unreferenced local variable
+  rs232.c
+  SndVolHWMixer.vcxproj -> Y:\src\SndVolHWMixer\win\x64\Debug\SndVolHWMixer.exe
