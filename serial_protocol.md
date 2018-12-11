@@ -46,9 +46,11 @@ Message types:
 		
     MSGTYPE 2: Set channel volume %
 	    PC <-> MCU
+		uint8_t     channel
 		uint8_t     volVal
 	
-	MSGTYPE 3: Set (custom) master label
+	MSGTYPE 3: Set (custom) channel label
 	    PC -> MCU
+		uint8_t     channel
 		uint8_t     strLen
 		char[]      str, null terminated, MAX 32
