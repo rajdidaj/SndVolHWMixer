@@ -74,39 +74,41 @@ const msgtype_t MSGTYPE_SET_MASTER_LABEL = 1;
 const msgtype_t MSGTYPE_SET_CHANNEL_VOL_PREC = 2;
 const msgtype_t MSGTYPE_SET_CHANNEL_LABEL = 3;
 
-typedef struct
+struct msg_set_master_vol_prec
 {
 	msgtype_t msgType;
 	uint8_t volVal;
-}serialProtocol_set_master_vol_prec_t;
+};
 
-typedef struct
+struct msg_set_master_label
 {
 	msgtype_t msgType;
 	uint8_t strLen;
 	uint8_t str[32];
-}serialProtocol_set_master_label_t;
+};
 
-typedef struct
+struct msg_set_channel_vol_prec
 {
 	msgtype_t msgType;
+	uint8_t channel;
 	uint8_t volVal;
-}serialProtocol_set_channel_vol_prec_t;
+};
 
-typedef struct
+struct msg_set_channel_label
 {
 	msgtype_t msgType;
+	uint8_t channel;
 	uint8_t strLen;
 	uint8_t str[32];
-}serialProtocol_set_channel_label_t;
+};
 
 typedef union 
 {
 	msgtype_t msgType;
-	serialProtocol_set_master_vol_prec_t	msg_set_master_vol_prec;
-	serialProtocol_set_master_label_t		msg_set_master_label;
-	serialProtocol_set_channel_vol_prec_t	msg_set_channel_vol_prec;
-	serialProtocol_set_channel_label_t		msg_set_channel_label;
+	struct msg_set_master_vol_prec		msg_set_master_vol_prec;
+	struct msg_set_master_label			msg_set_master_label;
+	struct msg_set_channel_vol_prec		msg_set_channel_vol_prec;
+	struct msg_set_channel_label		msg_set_channel_label;
 }serialProtocol_t;
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
@@ -195,10 +197,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 	else
 	{
-		printf("Serial port %d opened\n", cport_nr + 1);
-		char testBuf[64];
-		sprintf_s(testBuf, "%c", 0x03);	//Clear display
-		RS232_SendBuf(cport_nr, (unsigned char*)testBuf, strlen(testBuf));
+		printf("Serial port %d opened\n", cport_nr + 1);		
 	}
 
 	// -------------------------
@@ -484,50 +483,42 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 
 void sendChannelInfo(int ch)
 {
-	//size_t numconv;
-	//char charName[CHNAMELEN * 2];
-	//uint8_t vol;
-	//float fvol;
+	size_t numconv;
+	char charName[32 * 2];
+	uint8_t vol;
+	float fvol;
+	serialProtocol_t *msg;
 
-	//groups[ch].pVolumeControl->GetMasterVolume(&fvol);
-	////scale [-64.0 ; 0.0] to [0 ; 100]
+	groups[ch].pVolumeControl->GetMasterVolume(&fvol);
+	//scale [-64.0 ; 0.0] to [0 ; 100]
 
-	//vol = (fvol + 64.0) / 0.64;
+	vol = (fvol + 64.0) / 0.64;
 
-	//wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
-	//
-	////Build message
-	//pMsg = msgBuf;
-	//msg_t *msg;
-	//*pMsg++ = STX;
+	msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_VOL_PREC, sizeof(struct msg_set_channel_vol_prec));	
+	msg->msg_set_channel_vol_prec.channel = 0;
+	msg->msg_set_channel_vol_prec.volVal = vol;
+	protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
+	freeProtocolBuf(msg);
 
-	//// msg structure start
-	//msg = (msg_t*)pMsg;
-	//msg->startCookie = STARTCOOKIE;
-	//msg->chIndex = ch;		
 
-	////volume info
-	//msg->chData.update = 1;
-	//msg->chData.volVal = vol;
-	//memset(msg->chData.name, 0, CHNAMELEN);
-	//memcpy_s(msg->chData.name, CHNAMELEN, charName, numconv);
+	wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
 
-	////Finish message
-	//pMsg += sizeof(msg_t);
-	//msg->endCookie = ENDCOOKIE;
-	//*pMsg++ = ETX;
-
-	//RS232_SendBuf(cport_nr, msgBuf, sizeof(msg_t) + 2);
+	msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, sizeof(struct msg_set_channel_label));
+	msg->msg_set_channel_label.channel = 0;	
+	memset(msg->msg_set_channel_label.str, 0, 32);
+	memcpy_s(msg->msg_set_channel_label.str, 32, charName, strlen(charName));
+	msg->msg_set_channel_label.strLen = strlen(charName);
+	protocolTxData(msg, sizeof(struct msg_set_channel_label));
+	freeProtocolBuf(msg);	
 }
 
 void sendMasterInfo(float fvol)
 {
-	static serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(serialProtocol_set_master_vol_prec_t));
-	
+	serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));	
 
 	msg->msg_set_master_vol_prec.volVal = 50;
 
-	protocolTxData(msg, sizeof(serialProtocol_set_master_vol_prec_t));
+	protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
 
 	freeProtocolBuf(msg);
 }
@@ -553,6 +544,7 @@ static void protocolTxData(void *dataPtr, int dataLength)
 {
 	int numData = 0;
 	int i;
+	int totalData = 0;
 	uint16_t checksum;
 	uint8_t *txBufPtr;
 	uint8_t *workBufPtr;
@@ -585,6 +577,7 @@ static void protocolTxData(void *dataPtr, int dataLength)
 	//Start the TX buffer with STX
 	txBufPtr = txBuffer;
 	*txBufPtr++ = STX;
+	totalData++;
 
 	//Copy data and check for reserved symbols and stuff if needed
 	for (i = 0; i < numData; i++)
@@ -596,6 +589,7 @@ static void protocolTxData(void *dataPtr, int dataLength)
 		case DLE:
 			//Reserved data, add a stuff byte and stuff the data
 			*txBufPtr++ = DLE;
+			totalData++;
 			*txBufPtr++ = msgBuffer[i] ^ 0x10;
 			break;
 
@@ -603,12 +597,13 @@ static void protocolTxData(void *dataPtr, int dataLength)
 			*txBufPtr++ = msgBuffer[i];
 			break;
 		}
+		totalData++;
 	}
 
 	//Finish off by adding the ETX
 	*txBufPtr++ = ETX;
-	
+	totalData++;
 	   
-	serialSendBuffer(txBuffer, txBufPtr - &txBuffer[0]);
+	serialSendBuffer(txBuffer, totalData);
 }
 #endif
