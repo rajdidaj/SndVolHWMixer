@@ -51,7 +51,7 @@ Message types:
     MSGTYPE 1: Set (custom) master label
         PC -> MCU
         uint8_t    strLen
-        char[]     str, null terminated, MAX 32
+        char[]     str, null terminated, MCU sets the upper limit to the data size
 
     MSGTYPE 2: Set channel volume %
         PC <-> MCU
@@ -62,8 +62,8 @@ Message types:
         PC -> MCU
         uint8_t     channel
         uint8_t     strLen
-        char[]      str, null terminated, MAX 32
+        char[]      str, null terminated, MAX 255, MCU sets the upper limit to the data size
         
     MSGTYPE 4: Set master icon
         PC->MCU
-        uint8_t     icon
+        uint8_t     icon, MCU sets the upper limit to the data size
