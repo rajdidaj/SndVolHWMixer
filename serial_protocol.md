@@ -65,5 +65,5 @@ Message types:
         char[]      str, null terminated, MAX 255, MCU sets the upper limit to the data size
         
     MSGTYPE 4: Set master icon
-        PC->MCU
+        PC -> MCU
         uint8_t     icon, MCU sets the upper limit to the data size

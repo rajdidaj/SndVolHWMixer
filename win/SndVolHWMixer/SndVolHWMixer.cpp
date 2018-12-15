@@ -13,6 +13,7 @@
 #include <audiopolicy.h>
 #include <Psapi.h>
 #include <WinUser.h>
+#include <Functiondiscoverykeys_devpkey.h>
 
 const uint8_t corsair[] =
     {
@@ -56,7 +57,7 @@ typedef struct
 groupData_t groups[MAX_GROUPS];
 
 int cport_nr = 5;        /* /dev/ttyS0 (COM1 on windows) */
-int bdrate = 19200;       /* 9600 baud */
+int bdrate = 19200;
 
 #define serialSendBuffer(_dPtr, _dCount)	RS232_SendBuf(cport_nr, _dPtr, _dCount)
 
@@ -147,13 +148,13 @@ void freeProtocolBuf(serialProtocol_t **);
 
 
 
-
+wchar_t deviceName[MAX_PATH];
 
 
 //Functions 
 int getGroups(IAudioSessionEnumerator *, groupData_t *);
 void getLabels(IAudioSessionEnumerator *, groupData_t *, int);
-void sendChannelInfo(int, int);
+void sendChannelInfo(int);
 void sendMasterInfo(float);
 
 HWND g_HWND = NULL;
@@ -241,6 +242,23 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	IAudioEndpointVolume *endpointVolume = NULL;
 	hr = defaultDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID *)&endpointVolume);
+    
+    LPWSTR devID;
+    IPropertyStore *pProps = NULL;
+    hr = defaultDevice->GetId(&devID);
+
+    hr = defaultDevice->OpenPropertyStore(
+        STGM_READ, &pProps);
+
+    PROPVARIANT varName;
+    // Initialize container for property value.
+    PropVariantInit(&varName);
+
+    // Get the endpoint's friendly-name property.
+    hr = pProps->GetValue(
+        PKEY_Device_FriendlyName, &varName);
+    wcscpy_s(deviceName, varName.pwszVal);
+
 
 	// ---------------------------
 	// Get the session managers for the endpoint device.	
@@ -284,14 +302,7 @@ int _tmain(int argc, _TCHAR* argv[])
     int channelIx = 0;
     for (int i = 0; i < groupCount; i++)
     {
-        if (wcsstr(groups[i].prettyName, L"AudioSrv.Dll") == NULL)
-        {
-            sendChannelInfo(channelIx++, i);
-        }
-        else
-        {
-            sendMasterInfo(currentVolume);
-        }
+        sendChannelInfo(i);    
     }
 		
 
@@ -447,6 +458,11 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 			printf("Group %d has a label: \"%S\"", i, groupData[i].displayName);
 			wcscpy_s(groups[i].prettyName, _countof(groups[i].prettyName), groupData[i].displayName);
             label = 1;
+
+            if (wcsstr(groups[i].prettyName, L"AudioSrv.Dll") != NULL)
+                {
+                wsprintfW(groups[i].prettyName, L"System Sounds");
+                }
 		}
 
 		//Get process id
@@ -508,9 +524,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 							memset(Buffer, 0, sizeof(Buffer));
 						}
 					}
-				}
-
-				
+				}		
 			}
 			else
 			{
@@ -525,7 +539,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 }
 
 
-void sendChannelInfo(int ch, int group)
+void sendChannelInfo(int ch)
 {
 	size_t numconv;
 	char charName[32 * 2];
@@ -545,25 +559,27 @@ void sendChannelInfo(int ch, int group)
 	freeProtocolBuf(&msg);
 
 
-	wcstombs_s(&numconv, charName, groups[group].prettyName, sizeof(charName));
+	wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
+    charName[31] = 0;
 
 	msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, sizeof(struct msg_set_channel_label));
 	msg->msg_set_channel_label.channel = ch;
 	memset(msg->msg_set_channel_label.str, 0, 32);
-	memcpy_s(msg->msg_set_channel_label.str, 32, charName, 32);
-    charName[31] = 0;
+	memcpy_s(msg->msg_set_channel_label.str, 32, charName, strlen(charName)+1);
 	msg->msg_set_channel_label.strLen = strlen(charName);
     
-	protocolTxData(msg, (sizeof(struct msg_set_channel_label) - 32) + strlen(charName));
+	protocolTxData(msg, sizeof(struct msg_set_channel_label) - (32 - strlen(charName))+1);
 	freeProtocolBuf(&msg);	
 }
 
 void sendMasterInfo(float fvol)
 {
+    char charName[32 * 2];
+    size_t numconv;
+
 	serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));	
 	msg->msg_set_master_vol_prec.volVal = 50;
 	protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
-
 	freeProtocolBuf(&msg);
 
     int size = sizeof(struct msg_set_master_icon) + sizeof(corsair);
@@ -572,6 +588,16 @@ void sendMasterInfo(float fvol)
     protocolTxData(msg, size);
     freeProtocolBuf(&msg);
 
+    wcstombs_s(&numconv, charName, deviceName, sizeof(charName));
+    charName[31] = 0;
+
+    msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, sizeof(struct msg_set_master_label));
+    memset(msg->msg_set_master_label.str, 0, 32);
+    memcpy_s(msg->msg_set_master_label.str, 32, charName, strlen(charName)+1);
+    msg->msg_set_master_label.strLen = strlen(charName);
+
+    protocolTxData(msg, sizeof(struct msg_set_master_label) - (32 - strlen(charName))+1);
+    freeProtocolBuf(&msg);
 
 }
 
