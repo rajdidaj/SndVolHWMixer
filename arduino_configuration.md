@@ -1,4 +1,5 @@
 Arduino Mega 2560 configuration
+Using the Platform.IO way of doing things.
 
 - 1 TCA9548A I2C switch
     - I2C address: 0x70
