@@ -63,3 +63,7 @@ Message types:
         uint8_t     channel
         uint8_t     strLen
         char[]      str, null terminated, MAX 32
+        
+    MSGTYPE 4: Set master icon
+        PC->MCU
+        uint8_t     icon
