@@ -36,10 +36,13 @@ Adafruit_SSD1306 mdisplay(MA_SCREEN_WIDTH, MA_SCREEN_HEIGHT, &Wire, -1, 800000, 
 Adafruit_SSD1306 display(CH_SCREEN_WIDTH, CH_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
 
 #define MAP_MAX       100
+#define MINVOLVAL     0
+#define MAXVOLVAL     100
 #define ENC_SCALE_MIN 0
 #define ENC_SCALE_MAX 200
 #define NUM_CHANNELS	4
 #define NUM_BUSES	    5
+
 enum BUS_NUMBER
 {
     CHANNEL_0 = 0,
@@ -66,8 +69,8 @@ typedef struct
     uint8_t *iconPtr;
 }volume_t;
 
-Encoder encoder(2, 3);
-Encoder encoder1(4, 5);
+Encoder encoder(18, 19);
+Encoder masterencoder(2, 3);
 const Encoder *encs[NUM_CHANNELS] =
 {
     &encoder,
@@ -75,12 +78,12 @@ const Encoder *encs[NUM_CHANNELS] =
     &encoder,
     &encoder
 };
-const Encoder *mencoder = &encoder;
+const Encoder *mencoder = &masterencoder;
 
-long prevPos[NUM_CHANNELS+1]    = { 0 };    // Previous encoder position
-long encData[NUM_CHANNELS+1]    = { 0 };    // Current value in the allowed range
-volume_t chData[NUM_CHANNELS] = { 0 };    // Scaled volume units
-volume_t masterData = { 0 };              // Scaled volume units
+long prevPos[NUM_CHANNELS]      = { 0 };    // Previous encoder position
+long prevMPos                   = 0;        // Previous encoder position
+volume_t chData[NUM_CHANNELS]   = { 0 };    // Scaled volume units
+volume_t masterData             = { 0 };              // Scaled volume units
 
 unsigned int ledval = 0;
 
@@ -221,7 +224,7 @@ void readVols(void)
     }
 
     newPosition = ((Encoder)*mencoder).read(); //Crazy cast to avoid warnings
-    checkAndSetVolVal(newPosition, &prevPos[MASTER], &masterData);
+    checkAndSetVolVal(newPosition, &prevMPos, &masterData);
 }
 
 /*
@@ -308,7 +311,7 @@ void drawText(volume_t *vP, const char *str)
     vP->display->setCursor(0, 0);
     vP->display->clearDisplay();
     vP->display->println(str);
-    vP->display->print(masterData.volVal, DEC);
+    vP->display->print(vP->volVal, DEC);
     vP->display->println(F(" %"));
 }
 
@@ -322,7 +325,7 @@ void drawText(volume_t *vP, const char *str)
 void drawBar(volume_t *vP)
 {
     vP->display->drawRoundRect(2, 17, 100, 10, 3, WHITE);
-    vP->display->fillRoundRect(4, 19, map(masterData.volVal, 0, MAP_MAX, 0, 96),6, 2, WHITE);
+    vP->display->fillRoundRect(4, 19, map(vP->volVal, MINVOLVAL, MAXVOLVAL, 0, 96),6, 2, WHITE);
 }
 
 /*
@@ -388,7 +391,7 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
     switch(msgPtr->msgType)
     {
         case MSGTYPE_SET_MASTER_VOL_PREC:
-        masterData.volVal = msgPtr->msg_set_master_vol_prec.volVal;
+        masterData.volVal = msgPtr->msg_set_master_vol_prec.volVal % MAXVOLVAL;
         masterData.update = 1;
         break;
 
@@ -403,7 +406,7 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         if(msgPtr->msg_set_channel_vol_prec.channel < NUM_CHANNELS)
         {
             channel = msgPtr->msg_set_channel_vol_prec.channel;
-            chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal;
+            chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal % MAXVOLVAL;
             chData[channel].update = 1;
         }
         break;
@@ -596,13 +599,13 @@ void checkAndSetVolVal(long newPosition, long *prevPosition, volume_t *volume)
     {
         diff = *prevPosition - newPosition;
 
-        if(volume->volVal + diff > 100)
+        if(volume->volVal + diff > MAXVOLVAL)
         {
-            volume->volVal = 100;
+            volume->volVal = MAXVOLVAL;
         }
         else if(volume->volVal + diff <= 0)
         {
-            volume->volVal = 0;
+            volume->volVal = MINVOLVAL;
         }
         else
         {
