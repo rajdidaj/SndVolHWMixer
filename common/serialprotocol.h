@@ -17,8 +17,8 @@ typedef enum
 const int MAX_MSG_LENGTH = 64;	//Any old number, deemed enough, would do
 const int MAX_RXTX_BUFFER_LENGTH = MAX_MSG_LENGTH * 2 + 4; //Needs to facilitate the start and stop tokens and the worst case stuffing situation
 
-//uint8_t msgBuffer[MAX_MSG_LENGTH] = { 0 };
-//uint8_t txBuffer[MAX_RXTX_BUFFER_LENGTH] = { 0 };
+uint8_t msgBuffer[MAX_MSG_LENGTH] = { 0 };
+uint8_t txBuffer[MAX_RXTX_BUFFER_LENGTH] = { 0 };
 uint8_t rxBuffer[MAX_RXTX_BUFFER_LENGTH] = { 0 };
 
 #ifdef serialSendBuffer
@@ -76,6 +76,8 @@ typedef union
     struct msg_set_channel_label		msg_set_channel_label;
     struct msg_set_master_icon          msg_set_master_icon;
 }serialProtocol_t;
+
+void protocolTxData(void *, int);	//Use this to send a known number of data bytes, set up a send macro to use
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t *);

@@ -18,7 +18,7 @@
 #include <Encoder.h>
 
 #include "bitmaps.h"
-#include "serialprotocol.h"
+#include "../../../common/serialprotocol.h"
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define MA_SCREEN_WIDTH 128 // OLED display width, in pixels
