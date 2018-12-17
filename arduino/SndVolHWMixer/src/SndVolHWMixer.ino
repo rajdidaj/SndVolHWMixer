@@ -35,7 +35,6 @@ included in any redistribution.
 Adafruit_SSD1306 mdisplay(MA_SCREEN_WIDTH, MA_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
 Adafruit_SSD1306 display(CH_SCREEN_WIDTH, CH_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
 
-#define MAP_MAX       100
 #define MINVOLVAL     0
 #define MAXVOLVAL     100
 #define ENC_SCALE_MIN 0
@@ -391,8 +390,11 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
     switch(msgPtr->msgType)
     {
         case MSGTYPE_SET_MASTER_VOL_PREC:
-        masterData.volVal = msgPtr->msg_set_master_vol_prec.volVal % MAXVOLVAL;
-        masterData.update = 1;
+        if( (msgPtr->msg_set_master_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_master_vol_prec.volVal <= MAXVOLVAL) )
+        {
+            masterData.volVal = msgPtr->msg_set_master_vol_prec.volVal;
+            masterData.update = 1;
+        }
         break;
 
         case MSGTYPE_SET_MASTER_LABEL:
@@ -406,8 +408,11 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         if(msgPtr->msg_set_channel_vol_prec.channel < NUM_CHANNELS)
         {
             channel = msgPtr->msg_set_channel_vol_prec.channel;
-            chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal % MAXVOLVAL;
-            chData[channel].update = 1;
+            if( (msgPtr->msg_set_channel_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_channel_vol_prec.volVal <= MAXVOLVAL) )
+            {
+                chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal;
+                chData[channel].update = 1;
+            }
         }
         break;
 
