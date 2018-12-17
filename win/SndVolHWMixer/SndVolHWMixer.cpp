@@ -14,6 +14,7 @@
 #include <Psapi.h>
 #include <WinUser.h>
 #include <Functiondiscoverykeys_devpkey.h>
+#include <conio.h>
 
 const uint8_t corsair[] =
     {
@@ -50,6 +51,9 @@ typedef struct
 
 	PWSTR					displayName;
 	WCHAR					prettyName[MAX_PATH];
+
+    float                   prevVolume;
+    int                     update;
 
 }groupData_t;
 
@@ -154,7 +158,7 @@ wchar_t deviceName[MAX_PATH];
 //Functions 
 int getGroups(IAudioSessionEnumerator *, groupData_t *);
 void getLabels(IAudioSessionEnumerator *, groupData_t *, int);
-void sendChannelInfo(int);
+void sendChannelInfo(int, float);
 void sendMasterInfo(float);
 
 HWND g_HWND = NULL;
@@ -228,6 +232,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	{
 		printf("Serial port %d opened\n", cport_nr + 1);		
         RS232_flushRXTX(cport_nr);
+        Sleep(2000); //Wait for the arduino to reset
 	}
 
 	// -------------------------
@@ -269,42 +274,49 @@ int _tmain(int argc, _TCHAR* argv[])
 	defaultDevice->Release();
 	defaultDevice = NULL;
 
-	// Master volume
-	float currentVolume = 0;
-	
-	endpointVolume->GetMasterVolumeLevel(&currentVolume);
-	printf("Current volume in dB is: %f\n", currentVolume);
-	sendMasterInfo(currentVolume);
-	
-	//hr = endpointVolume->GetMasterVolumeLevelScalar(&currentVolume);
-	//printf("Current volume as a scalar is: %f\n", currentVolume);
+    //get the sessionenumerator
+    IAudioSessionEnumerator *pEnumerator = NULL;
+    hr = pManager2->GetSessionEnumerator(&pEnumerator);
 
-	//get the sessionenumerator
-	IAudioSessionEnumerator *pEnumerator = NULL;
-	hr = pManager2->GetSessionEnumerator(&pEnumerator);
+    float lastVolume = -1;
 
-	//Get data and list info about streams		
-	groupCount = getGroups(pEnumerator, groups);
+    //Enter main loop
+    while (!_kbhit())
+        {
+        // Master volume
+        float currentVolume = 0;
 
-	getLabels(pEnumerator, groups, groupCount);
+        hr = endpointVolume->GetMasterVolumeLevelScalar(&currentVolume);
+        printf("Current volume as a scalar is: %f\n", currentVolume);
+        if (currentVolume != lastVolume)
+            {
+            sendMasterInfo(currentVolume * 100);
+            lastVolume = currentVolume;
+            }
+
+        //Get data and list info about streams		
+        groupCount = getGroups(pEnumerator, groups);
+
+        getLabels(pEnumerator, groups, groupCount);
 
 
+        if (decibels)
+            {
+            hr = endpointVolume->SetMasterVolumeLevel((float)newVolume, NULL);
+            }
+        else if (scalar)
+            {
+            hr = endpointVolume->SetMasterVolumeLevelScalar((float)newVolume, NULL);
+            }
 
-	if (decibels)
-	{
-		hr = endpointVolume->SetMasterVolumeLevel((float)newVolume, NULL);
-	}
-	else if (scalar)
-	{
-		hr = endpointVolume->SetMasterVolumeLevelScalar((float)newVolume, NULL);
-	}
+        int channelIx = 0;
+        for (int i = 0; i < groupCount; i++)
+            {
+            sendChannelInfo(i, -1);
+            }
 
-    int channelIx = 0;
-    for (int i = 0; i < groupCount; i++)
-    {
-        sendChannelInfo(i);    
-    }
-		
+        Sleep(200);
+        }
 
 	//Clean up
 	endpointVolume->Release();
@@ -539,7 +551,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 }
 
 
-void sendChannelInfo(int ch)
+void sendChannelInfo(int ch, float masterVolume)
 {
 	size_t numconv;
 	char charName[32 * 2];
@@ -548,28 +560,41 @@ void sendChannelInfo(int ch)
 	serialProtocol_t *msg;
 
 	groups[ch].pVolumeControl->GetMasterVolume(&fvol);
-	//scale [-64.0 ; 0.0] to [0 ; 100]
-
-	vol = (fvol + 64.0) / 0.64;
-
-	msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_VOL_PREC, sizeof(struct msg_set_channel_vol_prec));	
-	msg->msg_set_channel_vol_prec.channel = ch;
-	msg->msg_set_channel_vol_prec.volVal = vol;
-	protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
-	freeProtocolBuf(&msg);
-
-
-	wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
-    charName[31] = 0;
-
-	msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, sizeof(struct msg_set_channel_label));
-	msg->msg_set_channel_label.channel = ch;
-	memset(msg->msg_set_channel_label.str, 0, 32);
-	memcpy_s(msg->msg_set_channel_label.str, 32, charName, strlen(charName)+1);
-	msg->msg_set_channel_label.strLen = strlen(charName);
+    if (fvol != groups[ch].prevVolume)
+        {
+        groups[ch].update = 1;
+        groups[ch].prevVolume = fvol;
+        }
     
-	protocolTxData(msg, sizeof(struct msg_set_channel_label) - (32 - strlen(charName))+1);
-	freeProtocolBuf(&msg);	
+    if (groups[ch].update)
+        {
+        groups[ch].update = 0;
+
+        vol = fvol * 100;
+        if (masterVolume >= 0.0)
+            {
+            vol *= masterVolume;
+            }
+
+        msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_VOL_PREC, sizeof(struct msg_set_channel_vol_prec));
+        msg->msg_set_channel_vol_prec.channel = ch;
+        msg->msg_set_channel_vol_prec.volVal = vol;
+        protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
+        freeProtocolBuf(&msg);
+
+
+        wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
+        charName[31] = 0;
+
+        msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, sizeof(struct msg_set_channel_label));
+        msg->msg_set_channel_label.channel = ch;
+        memset(msg->msg_set_channel_label.str, 0, 32);
+        memcpy_s(msg->msg_set_channel_label.str, 32, charName, strlen(charName) + 1);
+        msg->msg_set_channel_label.strLen = strlen(charName);
+
+        protocolTxData(msg, sizeof(struct msg_set_channel_label) - (32 - strlen(charName)) + 1);
+        freeProtocolBuf(&msg);
+        }
 }
 
 void sendMasterInfo(float fvol)
@@ -578,7 +603,7 @@ void sendMasterInfo(float fvol)
     size_t numconv;
 
 	serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));	
-	msg->msg_set_master_vol_prec.volVal = 50;
+	msg->msg_set_master_vol_prec.volVal = fvol;
 	protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
 	freeProtocolBuf(&msg);
 
