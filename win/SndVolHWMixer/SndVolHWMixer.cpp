@@ -16,6 +16,8 @@
 #include <Functiondiscoverykeys_devpkey.h>
 #include <conio.h>
 
+#include "../../common/serialprotocol.h"
+
 const uint8_t corsair[] =
     {
     0x00, 0x00,
@@ -65,91 +67,8 @@ int bdrate = 19200;
 
 #define serialSendBuffer(_dPtr, _dCount)	RS232_SendBuf(cport_nr, _dPtr, _dCount)
 
-// --------------------- Serial Protocol start ----------------------
-#define STX				2
-#define ETX				3
-#define DLE				0x10
-
-typedef struct
-{
-	uint8_t startToken;		//Always STX
-	uint16_t dataLength;	//Always before stuffing
-}protocolHdr_t;
-
-typedef struct
-{
-	uint16_t checksum;		//Always calculated before stuffing
-	uint8_t endToken;		//Always ETX
-}protocolFtr_t;
-
-const int MAX_MSG_LENGTH = 256;	//Any old number, deemed enough, would do
-const int MAX_RXTX_BUFFER_LENGTH = MAX_MSG_LENGTH*2 + 2; //Needs to facilitate the start and stop tokens and the worst case stuffing situation
-
-uint8_t msgBuffer[MAX_MSG_LENGTH] = { 0 };
-uint8_t txBuffer[MAX_RXTX_BUFFER_LENGTH] = { 0 };
-
-#ifdef serialSendBuffer
-void protocolTxData(void *, int);	//Use this to send a known number of data bytes, set up the send macro to use
-#endif
-
-// ------------------------- Data layer ---------------------------
-typedef uint8_t msgtype_t;
-const msgtype_t MSGTYPE_SET_MASTER_VOL_PREC = 0;
-const msgtype_t MSGTYPE_SET_MASTER_LABEL = 1;
-const msgtype_t MSGTYPE_SET_CHANNEL_VOL_PREC = 2;
-const msgtype_t MSGTYPE_SET_CHANNEL_LABEL = 3;
-const msgtype_t MSGTYPE_SET_MASTER_ICON = 4;
-
-struct msg_set_master_vol_prec
-{
-	msgtype_t msgType;
-	uint8_t volVal;
-};
-
-struct msg_set_master_label
-{
-	msgtype_t msgType;
-	uint8_t strLen;
-	uint8_t str[32];
-};
-
-struct msg_set_channel_vol_prec
-{
-	msgtype_t msgType;
-	uint8_t channel;
-	uint8_t volVal;
-};
-
-struct msg_set_channel_label
-{
-	msgtype_t msgType;
-	uint8_t channel;
-	uint8_t strLen;
-	uint8_t str[32];
-};
-
-struct msg_set_master_icon
-    {
-    msgtype_t msgType;
-    uint8_t icon[];
-    };
-
-typedef union
-    {
-    msgtype_t msgType;
-    struct msg_set_master_vol_prec		msg_set_master_vol_prec;
-    struct msg_set_master_label			msg_set_master_label;
-    struct msg_set_channel_vol_prec		msg_set_channel_vol_prec;
-    struct msg_set_channel_label		msg_set_channel_label;
-    struct msg_set_master_icon          msg_set_master_icon;
-    }serialProtocol_t;
-
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t **);
-
-
-// --------------------- Serial Protocol end ----------------------
-
 
 
 wchar_t deviceName[MAX_PATH];
@@ -361,15 +280,6 @@ int getGroups(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData)
 
 		//Get guid
 		hr = streams[i].pSessionControl->GetGroupingParam(&streams[i].guid);
-		if ((hr == S_OK))
-		{
-			/*			OLECHAR* guidString;
-						StringFromCLSID(streams[i].guid, &guidString);
-						printf("Stream no %3d, group: %S\n",
-							i,
-							guidString);
-						CoTaskMemFree(guidString);			*/
-		}
 	}
 
 	//Get null guids, directly to the output
@@ -406,13 +316,8 @@ int getGroups(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData)
 		{
 			if ((wgroups[j].guid != GUID_NULL) && (j != i) && IsEqualGUID(wgroups[i].guid, wgroups[j].guid))
 			{
-				//OLECHAR* guidString;
-				//StringFromCLSID(groups[i].guid, &guidString);
-				//printf("Clearing group no %d, %d == %d, group: %S\n",
-				//	j,
-				//	i,
-				//	j,
-				//	guidString);
+                //Free the duplicate
+                wgroups[j].pSessionControl->Release();
 				memset(&wgroups[j], 0, sizeof(groupData_t));
 			}
 		}
@@ -445,6 +350,7 @@ int getGroups(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData)
 			i,
 			guidString,
 			groupData[i].displayName);
+        CoTaskMemFree(guidString);
 	}
 
 	printf("Current number of groups %d\n", groupCountG);
@@ -501,6 +407,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 				wchar_t *res_p;
 				TCHAR fullpath[MAX_PATH];
 				res_p = _wfullpath(fullpath, Buffer, _countof(fullpath));
+                
 				//printf("%S, ", fullpath);
 
 				TCHAR drive[3];
@@ -545,6 +452,8 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 			CloseHandle(Handle);
 		}
 
+        //Free memory
+        CoTaskMemFree(groups[i].displayName);
 		printf(", prettyName: \"%S\"", groups[i].prettyName);
 		printf("\n");
 	}
@@ -582,17 +491,16 @@ void sendChannelInfo(int ch, float masterVolume)
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
-
         wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
         charName[31] = 0;
 
-        msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, sizeof(struct msg_set_channel_label));
+        int len = sizeof(struct msg_set_channel_label) + strlen(charName) + 1;
+        msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, len);
         msg->msg_set_channel_label.channel = ch;
-        memset(msg->msg_set_channel_label.str, 0, 32);
-        memcpy_s(msg->msg_set_channel_label.str, 32, charName, strlen(charName) + 1);
+        memcpy_s(msg->msg_set_channel_label.str, strlen(charName) + 1, charName, strlen(charName) + 1);
         msg->msg_set_channel_label.strLen = strlen(charName);
 
-        protocolTxData(msg, sizeof(struct msg_set_channel_label) - (32 - strlen(charName)) + 1);
+        protocolTxData(msg, len);
         freeProtocolBuf(&msg);
         }
 }
@@ -616,12 +524,12 @@ void sendMasterInfo(float fvol)
     wcstombs_s(&numconv, charName, deviceName, sizeof(charName));
     charName[31] = 0;
 
-    msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, sizeof(struct msg_set_master_label));
-    memset(msg->msg_set_master_label.str, 0, 32);
-    memcpy_s(msg->msg_set_master_label.str, 32, charName, strlen(charName)+1);
+    int len = sizeof(struct msg_set_master_label) + strlen(charName) + 1;
+    msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, len);
+    memcpy_s(msg->msg_set_master_label.str, strlen(charName) + 1, charName, strlen(charName)+1);
     msg->msg_set_master_label.strLen = strlen(charName);
 
-    protocolTxData(msg, sizeof(struct msg_set_master_label) - (32 - strlen(charName))+1);
+    protocolTxData(msg, len);
     freeProtocolBuf(&msg);
 
 }
