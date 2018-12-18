@@ -84,9 +84,22 @@ HWND g_HWND = NULL;
 BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
 {
 	DWORD lpdwProcessId;
+    g_HWND = NULL;
 	GetWindowThreadProcessId(hwnd, &lpdwProcessId);
 	if (lpdwProcessId == lParam)
 	{
+        //Find the top level
+        while (1)
+            {
+            if (GetParent(hwnd))
+                {
+                hwnd = GetParent(hwnd);
+                }
+            else
+                {
+                break;
+                }
+            }
 		g_HWND = hwnd;
 		return FALSE;
 	}
@@ -434,7 +447,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 
 				if (!EnumWindows(EnumWindowsProcMy, pid))
 				{
-					if (GetWindowText((HWND)g_HWND, Buffer, _countof(Buffer)))
+					if (GetWindowText(g_HWND, Buffer, _countof(Buffer)))
 					{
 						printf(", window text: \"%S\"", Buffer);
 						if (wcslen(Buffer))
