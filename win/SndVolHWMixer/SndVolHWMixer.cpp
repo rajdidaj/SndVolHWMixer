@@ -60,7 +60,7 @@ typedef struct
 }groupData_t;
 
 //Globals
-groupData_t groups[MAX_GROUPS];
+groupData_t groups[MAX_GROUPS] = { 0 };
 
 int cport_nr = 5;        /* /dev/ttyS0 (COM1 on windows) */
 int bdrate = 19200;
@@ -504,8 +504,8 @@ void sendChannelInfo(int ch, float masterVolume)
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
-        wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));
-        charName[31] = 0;
+        wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));        
+        charName[sizeof(charName) - 1] = 0;
 
         int len = sizeof(struct msg_set_channel_label) + strlen(charName) + 1;
         msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, len);
@@ -535,7 +535,7 @@ void sendMasterInfo(float fvol)
     freeProtocolBuf(&msg);
 
     wcstombs_s(&numconv, charName, deviceName, sizeof(charName));
-    charName[31] = 0;
+    charName[sizeof(charName) - 1] = 0;
 
     int len = sizeof(struct msg_set_master_label) + strlen(charName) + 1;
     msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, len);

@@ -21,19 +21,19 @@
 #include "../../../common/serialprotocol.h"
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-#define MA_SCREEN_WIDTH 128 // OLED display width, in pixels
-#define MA_SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define CH_SCREEN_WIDTH 128 // OLED display width, in pixels
-#define CH_SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define MA_SCREEN_WIDTH         128     // OLED display width, in pixels
+#define MA_SCREEN_HEIGHT        64      // OLED display height, in pixels
+#define CH_SCREEN_WIDTH         128     // OLED display width, in pixels
+#define CH_SCREEN_HEIGHT        32      // OLED display height, in pixels
 Adafruit_SSD1306 mdisplay(MA_SCREEN_WIDTH, MA_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
 Adafruit_SSD1306 display(CH_SCREEN_WIDTH, CH_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
 
-#define MINVOLVAL     0
-#define MAXVOLVAL     100
-#define ENC_SCALE_MIN 0
-#define ENC_SCALE_MAX 200
-#define NUM_CHANNELS	4
-#define NUM_BUSES	    5
+#define MINVOLVAL               0
+#define MAXVOLVAL               100
+#define NUM_CHANNELS            4
+#define NUM_BUSES	            5
+#define MAX_TEXT_LEN            80
+#define MAX_TEXT_ONSCREEN       21
 
 enum BUS_NUMBER
 {
@@ -55,8 +55,11 @@ enum BUS_NUMBER
 typedef struct
 {
     uint8_t update;
+    uint8_t scrolling;
     uint8_t volVal;
-    char name[32];
+    char name[MAX_TEXT_LEN + 1];
+    char scrname[MAX_TEXT_ONSCREEN + 1];
+    char curCh;
     Adafruit_SSD1306 *display;
     uint8_t *iconPtr;
 }volume_t;
@@ -76,14 +79,14 @@ long prevPos[NUM_CHANNELS]      = { 0 };    // Previous encoder position
 long prevMPos                   = 0;        // Previous encoder position
 volume_t chData[NUM_CHANNELS]   = { 0 };    // Scaled volume units
 volume_t masterData             = { 0 };              // Scaled volume units
-
 unsigned int ledval = 0;
 
 
 void getCmds(uint8_t *, uint16_t);
 void readVols(void);
 int drawScreen(void);
-void drawText(volume_t *, const char *);
+void updateScrolls(void);
+void drawText(volume_t *, int);
 void drawBar(volume_t *);
 void drawVolIcon(volume_t *);
 void drawAppIcon(volume_t *);
@@ -164,7 +167,7 @@ void setup()
 void loop()
 {
     static int loops = 0;
-    static unsigned long idletimer = 0;
+    static unsigned long idletimer = SLEEP_TIMEOUT;
 
     decodeProtocol();
 
@@ -178,7 +181,11 @@ void loop()
             loops = 1;
             if(drawScreen())
             {
-                idletimer = 0;
+                idletimer = SLEEP_TIMEOUT;
+            }
+            else if(idletimer && !(idletimer % (BUSY_WAIT_1MS * 100)))
+            {
+                updateScrolls();
             }
         }
     }
@@ -190,9 +197,12 @@ void loop()
     digitalWrite(13, 0);
 
     //Clear the displays when not in use
-    if(idletimer++ >= SLEEP_TIMEOUT)
+    if(idletimer)
     {
-        idletimer = 0;
+        idletimer--;
+    }
+    else
+    {
         screenSaver();
     }
 }
@@ -250,34 +260,31 @@ int drawScreen(void)
     digitalWrite(13, 1);
 
     //Draw the master image
-    if(masterData.name[0] != 0)
+    if(masterData.name[0] == 0)
     {
-        drawText(&masterData, masterData.name);
+        sprintf(masterData.name, "%s", "Master");
     }
-    else
-    {
-        drawText(&masterData, "Master");
-    }
+    drawText(&masterData, 0);
+
     drawBar(&masterData);
     drawVolIcon(&masterData);
     drawAppIcon(&masterData);
 
     //Update
     selectBus(MASTER);
-    masterData.display->display();
     masterData.update = 0;
+    masterData.display->display();
 
     //channel data
     for (i = CHANNEL_0 ; i < NUM_CHANNELS; i++)
     {
-        if(chData[i].name[0] != 0)
+        chData[i].update = 0;
+
+        if(chData[i].name[0] == 0)
         {
-            drawText(&chData[i], (char*)chData[i].name);
+            sprintf(chData[i].name, "%s", "Untitled channel");
         }
-        else
-        {
-            drawText(&chData[i], "Untitled channel");
-        }
+        drawText(&chData[i], 0);
 
         drawBar(&chData[i]);
         drawVolIcon(&chData[i]);
@@ -286,9 +293,45 @@ int drawScreen(void)
         //Update
         selectBus(i);
         chData[i].display->display();
-        chData[i].update = 0;
+
     }
+
     return 1;
+}
+
+void updateScrolls(void)
+{
+    int i;
+
+    //Draw the master image
+    if(masterData.scrolling)
+    {
+    drawText(&masterData, 1);
+    drawBar(&masterData);
+    drawVolIcon(&masterData);
+    drawAppIcon(&masterData);
+
+        //Update
+    selectBus(MASTER);
+    masterData.display->display();
+    }
+
+    //channel data
+    for (i = CHANNEL_0 ; i < NUM_CHANNELS; i++)
+    {
+        if(chData[i].scrolling)
+        {
+            drawText(&chData[i], 1);
+
+            drawBar(&chData[i]);
+            drawVolIcon(&chData[i]);
+            drawAppIcon(&chData[i]);
+
+            //Update
+            selectBus(i);
+            chData[i].display->display();
+        }
+    }
 }
 
 /*
@@ -298,11 +341,25 @@ int drawScreen(void)
 ** Draws the text on the screen
 **------------------------------------------------------------------------------
 */
-void drawText(volume_t *vP, const char *str)
+void drawText(volume_t *vP, int scroll)
 {
     vP->display->setCursor(0, 0);
     vP->display->clearDisplay();
-    vP->display->println(str);
+
+    if(strlen(vP->name) > MAX_TEXT_ONSCREEN)
+    {
+        vP->scrolling = 1;
+        strncpy(vP->scrname, &vP->name[(scroll ? vP->curCh++ : vP->curCh)], MAX_TEXT_ONSCREEN);
+        if (vP->curCh >= MAX_TEXT_ONSCREEN)
+        {
+            vP->curCh = 0;
+        }
+    }
+    else
+    {
+        strncpy(vP->scrname, vP->name, MAX_TEXT_ONSCREEN);
+    }
+    vP->display->println(vP->scrname);
     vP->display->print(vP->volVal, DEC);
     vP->display->println(F(" %"));
 }
@@ -391,9 +448,10 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         break;
 
         case MSGTYPE_SET_MASTER_LABEL:
-        memset(masterData.name, 0, 32);
-        memcpy(masterData.name, msgPtr->msg_set_master_label.str, msgPtr->msg_set_master_label.strLen);
-        trimLabel(masterData.name, msgPtr->msg_set_master_label.strLen);
+        memset(masterData.name, 0, sizeof(masterData.name));
+        strncpy(masterData.name, msgPtr->msg_set_master_label.str, MAX_TEXT_LEN);
+        //trimLabel(masterData.name, msgPtr->msg_set_master_label.strLen);
+        masterData.curCh = 0;
         masterData.update = 1;
         break;
 
@@ -413,9 +471,10 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         if(msgPtr->msg_set_channel_label.channel < NUM_CHANNELS)
         {
             channel = msgPtr->msg_set_channel_label.channel;
-            memset(chData[channel].name, 0, 32);
-            memcpy(chData[channel].name, msgPtr->msg_set_channel_label.str, msgPtr->msg_set_channel_label.strLen);
-            trimLabel(chData[channel].name,  msgPtr->msg_set_channel_label.strLen);
+            memset(chData[channel].name, 0, sizeof(chData[channel].name));
+            strncpy(chData[channel].name, msgPtr->msg_set_channel_label.str, MAX_TEXT_LEN);
+            //trimLabel(chData[channel].name,  msgPtr->msg_set_channel_label.strLen);
+            chData[channel].curCh = 0;
             chData[channel].update = 1;
         }
         break;
@@ -627,9 +686,9 @@ void trimLabel(char * label, uint8_t len)
 {
     int i;
 
-    if (len >= 21)
+    if (len >= MAX_TEXT_LEN)
     {
-        i = 21;
+        i = MAX_TEXT_LEN;
     }
     else
     {

@@ -14,7 +14,7 @@ typedef enum
     MSGSTATE_DLE
 }msgState_t;
 
-const int MAX_MSG_LENGTH = 64;	//Any old number, deemed enough, would do
+const int MAX_MSG_LENGTH = 120;	//Any old number, deemed enough, would do
 const int MAX_RXTX_BUFFER_LENGTH = MAX_MSG_LENGTH * 2 + 4; //Needs to facilitate the start and stop tokens and the worst case stuffing situation
 
 uint8_t msgBuffer[MAX_MSG_LENGTH] = { 0 };
