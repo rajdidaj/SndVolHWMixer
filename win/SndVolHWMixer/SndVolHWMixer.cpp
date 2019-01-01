@@ -1,23 +1,43 @@
-
+/*
+**------------------------------------------------------------------------------
+** SndVolHWMixer:
+**
+** Finds all streams of the current audio endpoint and sends this information to
+** a hardware receiver.
+**------------------------------------------------------------------------------
+*/
+/*
+**------------------------------------------------------------------------------
+** Includes
+**------------------------------------------------------------------------------
+*/
 #include "pch.h"
 #include "rs232.h"
-#include <cstdio>
-#include <cstdlib>
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <windows.h>
 #include <mmdeviceapi.h>
 #include <tchar.h>
 #include <endpointvolume.h>
 #include <audiopolicy.h>
 #include <Psapi.h>
-#include <WinUser.h>
 #include <Functiondiscoverykeys_devpkey.h>
 #include <conio.h>
+#include <list>
 
 #include "../../common/serialprotocol.h"
 
+/*
+**------------------------------------------------------------------------------
+** ToDo
+**------------------------------------------------------------------------------
+*/
+//Detect changes in the list of groups and send info accordingly
+//Refactor master info enquiry to a single function. Use the Group class?
+//hr = endpointVolume->SetMasterVolumeLevelScalar((float)newVolume, NULL); //set master volume
+
+/*
+**------------------------------------------------------------------------------
+** Constants
+**------------------------------------------------------------------------------
+*/
 const uint8_t corsair[] =
     {
     0x00, 0x00,
@@ -38,48 +58,157 @@ const uint8_t corsair[] =
     0x00, 0x00
     };
 
-//Constants
-#define MAX_GROUPS 128
-#define MAX_STREAMS 128
 
-//Types
+/*
+**------------------------------------------------------------------------------
+** Type/class definitions
+**------------------------------------------------------------------------------
+*/
 typedef struct
 {
-	int streamIndex;
-	IAudioSessionControl	*pSessionControl;
-	IAudioSessionControl2	*pSessionControl2;
-	ISimpleAudioVolume		*pVolumeControl;
-	GUID					guid;
+	IAudioSessionControl	*pSessionControl;       //SessionControl for this stream
+	IAudioSessionControl2	*pSessionControl2;      //SessionControl2 for this stream
+	ISimpleAudioVolume		*pVolumeControl;        //AudioVolume for this stream
+	GUID					guid;                   //guid for this stream
 
-	PWSTR					displayName;
-	WCHAR					prettyName[MAX_PATH];
+	PWSTR					displayName;            //Obtained by IAudioSessionControl.GetDisplayName, don't forget to release after use
+	WCHAR					prettyName[MAX_PATH];   //Pretty name, the final name sent to the receiver
 
-    float                   prevVolume;
-    int                     update;
+    float                   prevVolume;             //previous volume value
+    int                     update;                 //update flag
 
 }groupData_t;
 
-//Globals
-groupData_t groups[MAX_GROUPS] = { 0 };
+class Group
+    {
+    public:
+        groupData_t g;
+        int duplicate;
 
-int cport_nr = 5;        /* /dev/ttyS0 (COM1 on windows) */
-int bdrate = 19200;
+        /*
+        **----------------------------------------------------------------------
+        ** Group constructor:
+        **
+        ** Initiates everything
+        **----------------------------------------------------------------------
+        */
+        Group(void)
+            {
+            duplicate = -1;
 
-#define serialSendBuffer(_dPtr, _dCount)	RS232_SendBuf(cport_nr, _dPtr, _dCount)
+            g.pSessionControl = NULL;
+            g.pSessionControl2 = NULL;
+            g.pVolumeControl = NULL;
+            g.guid = GUID_NULL;
+
+            g.displayName = NULL;
+            g.prettyName[0] = '\0';
+            g.prevVolume = NAN;
+            g.update = true;            
+            }
+
+        /*
+        **----------------------------------------------------------------------
+        ** freeAll method:
+        **
+        ** Frees all objects associated with this group object (acquired by 
+        ** getSessionData)
+        **----------------------------------------------------------------------
+        */
+        void freeAll(void)
+            {
+            if (g.pSessionControl)
+                {
+                g.pSessionControl->Release();
+                }
+
+            if (g.pSessionControl2)
+                {
+                g.pSessionControl2->Release();
+                }
+
+            if (g.pVolumeControl)
+                {
+                g.pVolumeControl->Release();
+                }
+
+            if (g.displayName)
+                {
+                CoTaskMemFree(g.displayName);
+                }
+            }
+
+        /*
+        **----------------------------------------------------------------------
+        ** getSessionData method:
+        **
+        ** Gets all avaliable objects needed for the information to be displayed
+        **----------------------------------------------------------------------
+        */
+        void getSessionData(IAudioSessionEnumerator *pEnumerator, int streamIndex)
+            {
+            //Get sessioncontrol
+            pEnumerator->GetSession(streamIndex, &g.pSessionControl);
+
+            //Get guid
+            g.pSessionControl->GetGroupingParam(&g.guid);
+
+            //Get sessioncontrol2
+            g.pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&g.pSessionControl2);
+
+            //Get volume control
+            g.pSessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&g.pVolumeControl);
+
+            //Get displayname
+            g.pSessionControl->GetDisplayName(&g.displayName);
+
+            OLECHAR* guidString;
+            StringFromCLSID(g.guid, &guidString);
+            printf("Stream: %S, displayName: \"%S\"\n",
+                guidString,
+                g.displayName);
+            CoTaskMemFree(guidString);
+
+            }
+    };
+
+/*
+**------------------------------------------------------------------------------
+** Variables
+**------------------------------------------------------------------------------
+*/
+using namespace std; 
+list <Group> groupList;          //Group data
+
+int cport_nr = 5;                           //Serial port index
+int bdrate = 19200;                         //Baud rate
+wchar_t deviceName[MAX_PATH];               //Endpoint name
+
+/*
+**------------------------------------------------------------------------------
+** Function prototypes
+**------------------------------------------------------------------------------
+*/
+int getGroups(IAudioSessionEnumerator *);
+void getLabels(void);
+void sendChannelInfo(int, float);
+void sendMasterInfo(float);
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t **);
 
+/*
+**------------------------------------------------------------------------------
+** Macros
+**------------------------------------------------------------------------------
+*/
+#define serialSendBuffer(_dPtr, _dCount)	RS232_SendBuf(cport_nr, _dPtr, _dCount)
 
-wchar_t deviceName[MAX_PATH];
-
-
-//Functions 
-int getGroups(IAudioSessionEnumerator *, groupData_t *);
-void getLabels(IAudioSessionEnumerator *, groupData_t *, int);
-void sendChannelInfo(int, float);
-void sendMasterInfo(float);
-
+/*
+**------------------------------------------------------------------------------
+** Callback functions
+**------------------------------------------------------------------------------
+*/
 HWND g_HWND = NULL;
 BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
 {
@@ -106,53 +235,19 @@ BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
 	return TRUE;
 }
 
-void Usage()
-{
-	printf("Usage: \n");
-	printf(" SetVolume [Reports the current volume]\n");
-	printf(" SetVolume -d <new volume in decibels> [Sets the current default render device volume to the new volume]\n");
-	printf(" SetVolume -f <new volume as an amplitude scalar> [Sets the current default render device volume to the new volume]\n");
-
-}
-
+/*
+**------------------------------------------------------------------------------
+** Main function
+**------------------------------------------------------------------------------
+*/
 int _tmain(int argc, _TCHAR* argv[])
 {
 	HRESULT hr;
-	bool decibels = false;
-	bool scalar = false;
+	
 	double newVolume;
 	int groupCount = 0;
-
-
-	if (argc != 3 && argc != 1)
-	{
-		Usage();
-		return -1;
-	}
-	if (argc == 3)
-	{
-		if (argv[1][0] == '-')
-		{
-			if (argv[1][1] == 'f')
-			{
-				scalar = true;
-			}
-			else if (argv[1][1] == 'd')
-			{
-				decibels = true;
-			}
-		}
-		else
-		{
-			Usage();
-			return -1;
-		}
-
-		newVolume = _tstof(argv[2]);
-	}
-
-
-	int i = 0;
+    
+    int i = 0;
 	char mode[] = { '8','N','1',0 };
 	char str[2][512];
 
@@ -227,19 +322,10 @@ int _tmain(int argc, _TCHAR* argv[])
             }
 
         //Get data and list info about streams		
-        groupCount = getGroups(pEnumerator, groups);
+        groupCount = getGroups(pEnumerator);
 
-        getLabels(pEnumerator, groups, groupCount);
+        getLabels();
 
-
-        if (decibels)
-            {
-            hr = endpointVolume->SetMasterVolumeLevel((float)newVolume, NULL);
-            }
-        else if (scalar)
-            {
-            hr = endpointVolume->SetMasterVolumeLevelScalar((float)newVolume, NULL);
-            }
 
         int channelIx = 0;
         for (int i = 0; i < groupCount; i++)
@@ -262,145 +348,134 @@ int _tmain(int argc, _TCHAR* argv[])
 }
 
 
-
-int getGroups(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData)
+/*
+**------------------------------------------------------------------------------
+** getGroups:
+**
+** Gets all streams and groups them up per guid
+**------------------------------------------------------------------------------
+*/
+int getGroups(IAudioSessionEnumerator *pEnumerator)
 {
-
-	typedef struct
-	{
-		IAudioSessionControl *pSessionControl;
-		GUID guid;
-	}streamList_t;
-
-	streamList_t streams[MAX_STREAMS];
-	groupData_t wgroups[MAX_GROUPS];
-
 	HRESULT hr;
-	int currentStreamCount = 0;
-	int groupCount0 = 0;
-	int groupCount = 0;
-	int groupCountG = 0;
+	int currentStreamCount = 0;    
 
 	hr = pEnumerator->GetCount(&currentStreamCount);
 
 	printf("Current number of streams %d\n", currentStreamCount);
 
-	//Get guids
-	for (int i = 0; i < currentStreamCount; i++)
-	{
-		//Get session control
-		hr = pEnumerator->GetSession(i, &streams[i].pSessionControl);
+    //Get guids of all streams    
+    for (int i = 0; i < currentStreamCount; i++)
+        {
+        Group group;             
+       
+        //Get guid, sessioncontrol, sessioncontrol2, etc...
+        group.getSessionData(pEnumerator, i);
 
-		//Get guid
-		hr = streams[i].pSessionControl->GetGroupingParam(&streams[i].guid);
-	}
+        //Add to the list
+        groupList.push_back(group);
+        }
 
-	//Get null guids, directly to the output
-	for (int i = 0; i < currentStreamCount; i++)
-	{
-		if (streams[i].guid == GUID_NULL)
-		{
-			//Copy the current stream to a group
-			groupData[groupCount0++].guid = streams[i].guid;
-			groupData[groupCount0++].pSessionControl = streams[i].pSessionControl;
+    //Find stream groups
+    list <Group>::iterator grp;
+    list <Group>::iterator cmp;
+    int dupe = 0;
 
-			groupCount0++;
-		}
-	}
+    //Iterate through the list of streams
+    for (grp = groupList.begin() ; grp != groupList.end() ; grp++, dupe++)
+        {
+        //Compare grp to all other list items, except null guids
+        for (cmp = groupList.begin(); cmp != groupList.end() ; cmp++)
+            {
+            if ( ((*cmp).g.guid != GUID_NULL) && (cmp != grp) && IsEqualGUID((*grp).g.guid, (*cmp).g.guid) )
+                {
+                //Mark the duplicate
+                (*cmp).duplicate = dupe;
+                }
+            }
+        }
 
-	//Get the remaining guids
-	for (int i = 0; i < currentStreamCount; i++)
-	{
-		if (streams[i].guid != GUID_NULL)
-		{
-			//Copy the current stream to a group
-			wgroups[groupCount].guid = streams[i].guid;
-			wgroups[groupCount].pSessionControl = streams[i].pSessionControl;
+    //Get rid of the dupes
+    for (grp = groupList.begin(); grp != groupList.end(); grp++)
+        {
+        dupe = (*grp).duplicate;
+        if (dupe >= 0)
+            {
+            cmp = grp;
 
-			groupCount++;
-		}
-	}
+            for (cmp++ ; cmp != groupList.end(); cmp++)
+                {
+                if ((*cmp).duplicate == dupe)
+                    {
+                    //Free memory occupied by the duplicate list item
+                    (*cmp).freeAll();
 
-	groupCountG = groupCount0;
-	//Compare guids, throw away duplicates
-	for (int i = 0; i < groupCount; i++)
-	{
-		for (int j = 0; j < groupCount; j++)
-		{
-			if ((wgroups[j].guid != GUID_NULL) && (j != i) && IsEqualGUID(wgroups[i].guid, wgroups[j].guid))
-			{
-                //Free the duplicate
-                wgroups[j].pSessionControl->Release();
-				memset(&wgroups[j], 0, sizeof(groupData_t));
-			}
-		}
-	}
+                    //Remove the duplicate list item
+                    groupList.erase(cmp);
+                    
+                    //cmp is now invalid, so restart at grp+1
+                    cmp = grp;
+                    cmp++;
+                    }
+                }
+            }        
+        }
 
-	//Collect the remaining unique guids
-	for (int i = 0; i < groupCount; i++)
-	{
-		if (wgroups[i].guid != GUID_NULL)
-		{
-			groupData[groupCountG].guid = wgroups[i].guid;
-			groupData[groupCountG].pSessionControl = wgroups[i].pSessionControl;
+    printf("Current number of groups %d\n", groupList.size());
 
-			groupCountG++;
-		}
-	}
-
-	//Total number of groups, get the rest of the data
-	for (int i = 0; i < groupCountG; i++)
-	{
-		//Sessioncontrol2
-		groupData[i].pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&groupData[i].pSessionControl2);
-		groupData[i].pSessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&groupData[i].pVolumeControl);
-		groupData[i].pSessionControl->GetDisplayName(&groupData[i].displayName);
-
-
-		OLECHAR* guidString;
-		StringFromCLSID(groupData[i].guid, &guidString);
-		printf("Group no %3d, group: %S, name: \"%S\"\n",
-			i,
-			guidString,
-			groupData[i].displayName);
-        CoTaskMemFree(guidString);
-	}
-
-	printf("Current number of groups %d\n", groupCountG);
-
-	return groupCountG;
+    return groupList.size();
 }
 
-void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int groupCount)
+/*
+**------------------------------------------------------------------------------
+** getLabels:
+**
+** Gets the best available label for the all groups
+**------------------------------------------------------------------------------
+*/
+void getLabels(void)
 {
 	HRESULT hr;
     int label;
+    list <Group>::iterator grp;
 
 	//Find the groups that fo not have a good label already
-	for (int i = 0; i < groupCount; i++)
+	for (grp = groupList.begin() ; grp != groupList.end() ; grp++)
 	{
         label = 0;
-		if (!wcscmp(groupData[i].displayName, L""))
+		if (!wcscmp((*grp).g.displayName, L""))
 		{
-			printf("Group %d has no label", i);
+            OLECHAR* guidString;
+            StringFromCLSID((*grp).g.guid, &guidString);
+
+			printf("Group %S has no label", guidString);
+
+            CoTaskMemFree(guidString);
 		}
 		else
 		{
-			printf("Group %d has a label: \"%S\"", i, groupData[i].displayName);
-			wcscpy_s(groups[i].prettyName, _countof(groups[i].prettyName), groupData[i].displayName);
+
+            OLECHAR* guidString;
+            StringFromCLSID((*grp).g.guid, &guidString);            
+
+			printf("Group %S has a label: \"%S\"", guidString, (*grp).g.displayName);
+
+            CoTaskMemFree(guidString);
+
+			wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), (*grp).g.displayName);
             label = 1;
 
-            if (wcsstr(groups[i].prettyName, L"AudioSrv.Dll") != NULL)
+            if (wcsstr((*grp).g.prettyName, L"AudioSrv.Dll") != NULL)
                 {
-                wsprintfW(groups[i].prettyName, L"System Sounds");
+                wsprintfW((*grp).g.prettyName, L"System Sounds");
                 }
 		}
-
-		//Get process id
-
-		//Get imagename
+        
+        //Get process id
 		DWORD pid;
-		hr = groupData[i].pSessionControl2->GetProcessId(&pid);
+		hr = (*grp).g.pSessionControl2->GetProcessId(&pid);
+        
+        //Get imagename
 		HANDLE Handle = OpenProcess(
 			PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
 			FALSE,
@@ -441,7 +516,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 
 				if (wcslen(fname) && !label)
 				{
-					wcscpy_s(groups[i].prettyName, _countof(groups[i].prettyName), fname);
+					wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), fname);
 					memset(fname, 0, sizeof(fname));
 				}
 
@@ -452,7 +527,7 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 						printf(", window text: \"%S\"", Buffer);
 						if (wcslen(Buffer))
 						{
-							wcscpy_s(groups[i].prettyName, _countof(groups[i].prettyName), Buffer);
+							wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), Buffer);
 							memset(Buffer, 0, sizeof(Buffer));
 						}
 					}
@@ -465,14 +540,20 @@ void getLabels(IAudioSessionEnumerator *pEnumerator, groupData_t *groupData, int
 			CloseHandle(Handle);
 		}
 
-        //Free memory
-        CoTaskMemFree(groups[i].displayName);
-		printf(", prettyName: \"%S\"", groups[i].prettyName);
+        (*grp).g.update = true;
+
+		printf(", prettyName: \"%S\"", (*grp).g.prettyName);
 		printf("\n");
 	}
 }
 
-
+/*
+**------------------------------------------------------------------------------
+** sendChannelInfo:
+**
+** Sends the specified channel information to the receiver
+**------------------------------------------------------------------------------
+*/
 void sendChannelInfo(int ch, float masterVolume)
 {
 	size_t numconv;
@@ -480,17 +561,24 @@ void sendChannelInfo(int ch, float masterVolume)
 	uint8_t vol;
 	float fvol;
 	serialProtocol_t *msg;
+    int chnum = ch;
 
-	groups[ch].pVolumeControl->GetMasterVolume(&fvol);
-    if (fvol != groups[ch].prevVolume)
+    list <Group>::iterator i;
+    for (i = groupList.begin(); ch ; i++, ch--)
         {
-        groups[ch].update = 1;
-        groups[ch].prevVolume = fvol;
+        //do nothing
+        }
+
+	(*i).g.pVolumeControl->GetMasterVolume(&fvol);
+    if (fvol != (*i).g.prevVolume)
+        {
+        (*i).g.update = 1;
+        (*i).g.prevVolume = fvol;
         }
     
-    if (groups[ch].update)
+    if ((*i).g.update)
         {
-        groups[ch].update = 0;
+        (*i).g.update = false;
 
         vol = fvol * 100;
         if (masterVolume >= 0.0)
@@ -499,17 +587,17 @@ void sendChannelInfo(int ch, float masterVolume)
             }
 
         msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_VOL_PREC, sizeof(struct msg_set_channel_vol_prec));
-        msg->msg_set_channel_vol_prec.channel = ch;
+        msg->msg_set_channel_vol_prec.channel = chnum;
         msg->msg_set_channel_vol_prec.volVal = vol;
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
-        wcstombs_s(&numconv, charName, groups[ch].prettyName, sizeof(charName));        
+        wcstombs_s(&numconv, charName, (*i).g.prettyName, sizeof(charName));
         charName[sizeof(charName) - 1] = 0;
 
         int len = sizeof(struct msg_set_channel_label) + strlen(charName) + 1;
         msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_LABEL, len);
-        msg->msg_set_channel_label.channel = ch;
+        msg->msg_set_channel_label.channel = chnum;
         memcpy_s(msg->msg_set_channel_label.str, strlen(charName) + 1, charName, strlen(charName) + 1);
         msg->msg_set_channel_label.strLen = strlen(charName);
 
@@ -518,6 +606,13 @@ void sendChannelInfo(int ch, float masterVolume)
         }
 }
 
+/*
+**------------------------------------------------------------------------------
+** sendMasterInfo:
+**
+** Sends the audio endpoint master volume to the receiver
+**------------------------------------------------------------------------------
+*/
 void sendMasterInfo(float fvol)
 {
     char charName[32 * 2];
@@ -547,6 +642,13 @@ void sendMasterInfo(float fvol)
 
 }
 
+/*
+**------------------------------------------------------------------------------
+** allocProtocolBuf:
+**
+** Allocates memory for the specified message
+**------------------------------------------------------------------------------
+*/
 serialProtocol_t * allocProtocolBuf(msgtype_t msgType, size_t bytes)
 {
 	serialProtocol_t *blockPtr = 0;
@@ -558,12 +660,26 @@ serialProtocol_t * allocProtocolBuf(msgtype_t msgType, size_t bytes)
 	return blockPtr;
 }
 
+/*
+**------------------------------------------------------------------------------
+** freeProtocolBuf:
+**
+** Frees up a previously allocated buffer
+**------------------------------------------------------------------------------
+*/
 void freeProtocolBuf(serialProtocol_t **blockBtr)
 {
 	free(*blockBtr);
     *blockBtr = NULL;
 }
 
+/*
+**------------------------------------------------------------------------------
+** protocolTxData:
+**
+** Pads, checksums and transmits a message to the receiver
+**------------------------------------------------------------------------------
+*/
 #ifdef serialSendBuffer
 static void protocolTxData(void *dataPtr, int dataLength)
 {
