@@ -93,8 +93,9 @@ void drawAppIcon(volume_t *);
 void decodeProtocol(void);
 void selectBus(int8_t);
 void screenSaver(void);
-void checkAndSetVolVal(long, long *, volume_t *);
+int checkAndSetVolVal(long, long *, volume_t *);
 void trimLabel(char *, uint8_t);
+void sendChannelUpdate(int8_t);
 
 /*
 **------------------------------------------------------------------------------
@@ -222,11 +223,19 @@ void readVols(void)
     for(i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
         newPosition = ((Encoder)*encs[i]).read(); //Crazy cast to avoid warnings
-        checkAndSetVolVal(newPosition, &prevPos[i], &chData[i]);
+        if(checkAndSetVolVal(newPosition, &prevPos[i], &chData[i]))
+        {
+            //Update channel in the PC
+            sendChannelUpdate(i);
+        }
     }
 
     newPosition = ((Encoder)*mencoder).read(); //Crazy cast to avoid warnings
-    checkAndSetVolVal(newPosition, &prevMPos, &masterData);
+    if(checkAndSetVolVal(newPosition, &prevMPos, &masterData))
+    {
+        //Update master in the PC
+        sendChannelUpdate(MASTER);
+    }
 }
 
 /*
@@ -648,7 +657,7 @@ void screenSaver(void)
 ** accordingly.
 **------------------------------------------------------------------------------
 */
-void checkAndSetVolVal(long newPosition, long *prevPosition, volume_t *volume)
+int checkAndSetVolVal(long newPosition, long *prevPosition, volume_t *volume)
 {
     long diff;
 
@@ -671,7 +680,10 @@ void checkAndSetVolVal(long newPosition, long *prevPosition, volume_t *volume)
         volume->update = 1;
 
         *prevPosition = newPosition;
+
+        return 1;
     }
+    return 0;
 }
 
 /*
@@ -703,4 +715,107 @@ void trimLabel(char * label, uint8_t len)
             break;
         }
     }
+}
+
+/*
+**------------------------------------------------------------------------------
+** protocolTxData:
+**
+** Stuffs and checksums the data to be sent
+**------------------------------------------------------------------------------
+*/
+#ifdef serialSendBuffer
+static void protocolTxData(void *dataPtr, int dataLength)
+{
+	int numData = 0;
+	int i;
+	int totalData = 0;
+	uint16_t checksum;
+	uint8_t *txBufPtr;
+	uint8_t *workBufPtr;
+
+	//Fill the work buffer
+	workBufPtr = msgBuffer;
+
+	//Start the message by adding the length
+	*((uint16_t*)workBufPtr) = dataLength;
+	numData += 2;
+	workBufPtr += 2;	//Jump to the first data byte
+
+	//Copy the data
+	memcpy(workBufPtr, dataPtr, dataLength);
+	numData += dataLength;
+	workBufPtr += dataLength;	//Jump to the checksum
+
+	//calculate the checksum
+	checksum = 0;
+	for (i = 0; i < numData; i++)
+	{
+		checksum ^= msgBuffer[i];
+	}
+
+	//Add the checksum
+	*((uint16_t*)workBufPtr) = checksum;
+	numData += 2;
+
+
+	//Start the TX buffer with STX
+	txBufPtr = txBuffer;
+	*txBufPtr++ = STX;
+	totalData++;
+
+	//Copy data and check for reserved symbols and stuff if needed
+	for (i = 0; i < numData; i++)
+	{
+		switch (msgBuffer[i])
+		{
+		case STX:
+		case ETX:
+		case DLE:
+			//Reserved data, add a stuff byte and stuff the data
+			*txBufPtr++ = DLE;
+			totalData++;
+			*txBufPtr++ = msgBuffer[i] ^ 0x10;
+			break;
+
+		default:
+			*txBufPtr++ = msgBuffer[i];
+			break;
+		}
+		totalData++;
+	}
+
+	//Finish off by adding the ETX
+	*txBufPtr++ = ETX;
+	totalData++;
+
+	serialSendBuffer(txBuffer, totalData);
+}
+#endif
+
+/*
+**------------------------------------------------------------------------------
+** sendChannelUpdate:
+**
+** Sends a channel volume change update.
+**------------------------------------------------------------------------------
+*/
+void sendChannelUpdate(int8_t ch)
+{
+    uint8_t msg[3] = {0};
+    uint8_t len = 0;
+    
+    if(ch == MASTER)
+    {
+        msg[len++] = MSGTYPE_SET_MASTER_VOL_PREC;
+        msg[len++] = masterData.volVal;
+    }
+    else
+    {
+        msg[len++] = MSGTYPE_SET_CHANNEL_VOL_PREC;
+        msg[len++] = ch;
+        msg[len++] = chData[ch].volVal;
+    }
+
+    protocolTxData(msg, len);
 }
