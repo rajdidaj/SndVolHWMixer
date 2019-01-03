@@ -25,23 +25,44 @@
 #define MA_SCREEN_HEIGHT        64      // OLED display height, in pixels
 #define CH_SCREEN_WIDTH         128     // OLED display width, in pixels
 #define CH_SCREEN_HEIGHT        32      // OLED display height, in pixels
-Adafruit_SSD1306 mdisplay(MA_SCREEN_WIDTH, MA_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
-Adafruit_SSD1306 display(CH_SCREEN_WIDTH, CH_SCREEN_HEIGHT, &Wire, -1, 800000, 800000);
+Adafruit_SSD1306 mdisplay(MA_SCREEN_WIDTH, MA_SCREEN_HEIGHT, &Wire, -1, 600000, 400000);
+Adafruit_SSD1306 display(CH_SCREEN_WIDTH, CH_SCREEN_HEIGHT, &Wire, -1, 600000, 400000);
 
 #define MINVOLVAL               0
 #define MAXVOLVAL               100
-#define NUM_CHANNELS            4
-#define NUM_BUSES	            5
 #define MAX_TEXT_LEN            80
 #define MAX_TEXT_ONSCREEN       21
 
 enum BUS_NUMBER
 {
-    CHANNEL_0 = 0,
+    BUS_0 = 0,
+    BUS_1,
+    BUS_2,
+    BUS_3,
+    BUS_4,
+    BUS_5,
+    BUS_6,
+    BUS_MASTER,
+    NUM_BUSES
+};
+
+enum CHANNEL_NUMBER
+{
+    CHANNEL_MASTER = 0,
+    CHANNEL_0,
     CHANNEL_1,
     CHANNEL_2,
     CHANNEL_3,
-    MASTER,
+    NUM_CHANNELS
+};
+
+const int irqPins[] =
+{
+    2, //CHANNEL_MASTER
+    3, //CHANNEL_0
+    4, //CHANNEL_1
+    5, //CHANNEL_2
+    6, //CHANNEL_3
 };
 
 #define BUSY_WAIT_1MS   16L
@@ -54,6 +75,8 @@ enum BUS_NUMBER
 //This is the volume structure, used to control a specific volume
 typedef struct
 {
+    uint8_t encPin;
+    uint8_t encUpdate;
     uint8_t update;
     uint8_t scrolling;
     uint8_t volVal;
@@ -64,23 +87,14 @@ typedef struct
     uint8_t *iconPtr;
 }volume_t;
 
-Encoder encoder(18, 19);
-Encoder masterencoder(2, 3);
-const Encoder *encs[NUM_CHANNELS] =
+typedef union
 {
-    &encoder,
-    &encoder,
-    &encoder,
-    &encoder
-};
-const Encoder *mencoder = &masterencoder;
+    uint8_t bval[4];
+    uint32_t lval;
+}conv_t;
 
-long prevPos[NUM_CHANNELS]      = { 0 };    // Previous encoder position
-long prevMPos                   = 0;        // Previous encoder position
-volume_t chData[NUM_CHANNELS]   = { 0 };    // Scaled volume units
-volume_t masterData             = { 0 };              // Scaled volume units
+volume_t chData[NUM_CHANNELS+1]   = { 0 };
 unsigned int ledval = 0;
-
 
 void getCmds(uint8_t *, uint16_t);
 void readVols(void);
@@ -93,9 +107,12 @@ void drawAppIcon(volume_t *);
 void decodeProtocol(void);
 void selectBus(int8_t);
 void screenSaver(void);
-int checkAndSetVolVal(long, long *, volume_t *);
+void pollEncs(void);
 void trimLabel(char *, uint8_t);
 void sendChannelUpdate(int8_t);
+void encoderSetup(int8_t, uint8_t);
+int32_t encoderRead(int8_t);
+void encoderSet(int8_t ch, uint8_t);
 
 /*
 **------------------------------------------------------------------------------
@@ -136,25 +153,37 @@ void setup()
         chData[i].display->cp437(true);         // Use full 256 char 'Code Page 437' font
         chData[i].display->display();
         chData[i].iconPtr = NULL;
+
+        chData[i].encPin = irqPins[i];
+        chData[i].encUpdate = 1;
+        encoderSetup(i, chData[i].volVal);
+        pinMode(irqPins[i], INPUT_PULLUP);
     }
 
-    selectBus(MASTER);
+    //Set up the master display
+    i = CHANNEL_MASTER;
+    selectBus(i);
     if (!mdisplay.begin(SSD1306_SWITCHCAPVCC, 0x3d))  // Address 0x3D for 128x64, 0x3c for 128x32
     {
         for (;;)
         Serial.println(F("Master display allocation failed")); // Don't proceed, loop forever
     }
-    masterData.update = 1;
-    masterData.display = &mdisplay;
-    masterData.display->clearDisplay();
-    //masterData.display->.display();
+    // Clear the display at start
+    chData[i].update = 1;
+    chData[i].display = &mdisplay;
+    chData[i].display->clearDisplay();
 
-    masterData.display->setTextSize(1);      // Normal 1:1 pixel scale
-    masterData.display->setTextColor(WHITE); // Draw white text
-    masterData.display->setCursor(0, 0);     // Start at top-left corner
-    masterData.display->cp437(true);         // Use full 256 char 'Code Page 437' font
-    masterData.display->display();
-    masterData.iconPtr = NULL;
+    chData[i].display->setTextSize(1);      // Normal 1:1 pixel scale
+    chData[i].display->setTextColor(WHITE); // Draw white text
+    chData[i].display->setCursor(0, 0);     // Start at top-left corner
+    chData[i].display->cp437(true);         // Use full 256 char 'Code Page 437' font
+    chData[i].display->display();
+    chData[i].iconPtr = NULL;
+
+    chData[i].encPin = irqPins[i];
+    chData[i].encUpdate = 1;
+    encoderSetup(i, chData[i].volVal);
+    pinMode(irqPins[i], INPUT_PULLUP);
 }
 
 
@@ -168,7 +197,7 @@ void setup()
 void loop()
 {
     static int loops = 0;
-    static unsigned long idletimer = SLEEP_TIMEOUT;
+    static uint32_t idletimer = SLEEP_TIMEOUT;
 
     decodeProtocol();
 
@@ -206,6 +235,8 @@ void loop()
     {
         screenSaver();
     }
+
+    pollEncs();
 }
 
 /*
@@ -218,23 +249,29 @@ void loop()
 void readVols(void)
 {
     int i;
-    long newPosition;
 
     for(i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
-        newPosition = ((Encoder)*encs[i]).read(); //Crazy cast to avoid warnings
-        if(checkAndSetVolVal(newPosition, &prevPos[i], &chData[i]))
+        if(chData[i].encUpdate)
         {
+            chData[i].encUpdate = 0;
+            chData[i].update = 1;
+            //Read the encoder
+            chData[i].volVal = encoderRead(i);
             //Update channel in the PC
             sendChannelUpdate(i);
         }
     }
 
-    newPosition = ((Encoder)*mencoder).read(); //Crazy cast to avoid warnings
-    if(checkAndSetVolVal(newPosition, &prevMPos, &masterData))
+    i = CHANNEL_MASTER;
+    if(chData[i].encUpdate)
     {
-        //Update master in the PC
-        sendChannelUpdate(MASTER);
+        chData[i].encUpdate = 0;
+        chData[i].update = 1;
+        //Read the encoder
+        chData[i].volVal = encoderRead(i);
+        //Update channel in the PC
+        sendChannelUpdate(i);
     }
 }
 
@@ -249,14 +286,14 @@ int drawScreen(void)
 {
     int i;
     int update = 0;
-    for (i = 0; i < NUM_CHANNELS; i++)
+    for (i = CHANNEL_0; i < NUM_CHANNELS; i++)
     {
         if(chData[i].update)
         {
             update++;
         }
     }
-    if(masterData.update)
+    if(chData[CHANNEL_MASTER].update)
     {
         update++;
     }
@@ -269,20 +306,21 @@ int drawScreen(void)
     digitalWrite(13, 1);
 
     //Draw the master image
-    if(masterData.name[0] == 0)
-    {
-        sprintf(masterData.name, "%s", "Master");
-    }
-    drawText(&masterData, 0);
+    chData[CHANNEL_MASTER].update = 0;
 
-    drawBar(&masterData);
-    drawVolIcon(&masterData);
-    drawAppIcon(&masterData);
+    if(chData[CHANNEL_MASTER].name[0] == 0)
+    {
+        sprintf(chData[CHANNEL_MASTER].name, "%s", "Master");
+    }
+    drawText(&chData[CHANNEL_MASTER], 0);
+
+    drawBar(&chData[CHANNEL_MASTER]);
+    drawVolIcon(&chData[CHANNEL_MASTER]);
+    drawAppIcon(&chData[CHANNEL_MASTER]);
 
     //Update
-    selectBus(MASTER);
-    masterData.update = 0;
-    masterData.display->display();
+    selectBus(CHANNEL_MASTER);
+    chData[CHANNEL_MASTER].display->display();
 
     //channel data
     for (i = CHANNEL_0 ; i < NUM_CHANNELS; i++)
@@ -291,7 +329,7 @@ int drawScreen(void)
 
         if(chData[i].name[0] == 0)
         {
-            sprintf(chData[i].name, "%s", "Untitled channel");
+            sprintf(chData[i].name, "%s %d", "Untitled channel", i-CHANNEL_0);
         }
         drawText(&chData[i], 0);
 
@@ -302,7 +340,6 @@ int drawScreen(void)
         //Update
         selectBus(i);
         chData[i].display->display();
-
     }
 
     return 1;
@@ -313,16 +350,18 @@ void updateScrolls(void)
     int i;
 
     //Draw the master image
-    if(masterData.scrolling)
+    i = CHANNEL_MASTER;
+    if(chData[i].scrolling)
     {
-    drawText(&masterData, 1);
-    drawBar(&masterData);
-    drawVolIcon(&masterData);
-    drawAppIcon(&masterData);
+        drawText(&chData[i], 1);
+
+        drawBar(&chData[i]);
+        drawVolIcon(&chData[i]);
+        drawAppIcon(&chData[i]);
 
         //Update
-    selectBus(MASTER);
-    masterData.display->display();
+        selectBus(i);
+        chData[i].display->display();
     }
 
     //channel data
@@ -451,27 +490,29 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         case MSGTYPE_SET_MASTER_VOL_PREC:
         if( (msgPtr->msg_set_master_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_master_vol_prec.volVal <= MAXVOLVAL) )
         {
-            masterData.volVal = msgPtr->msg_set_master_vol_prec.volVal;
-            masterData.update = 1;
+            channel = CHANNEL_MASTER;
+            chData[channel].volVal = msgPtr->msg_set_master_vol_prec.volVal;
+            chData[channel].update = 1;
+            encoderSet(channel, chData[channel].volVal);
         }
         break;
 
         case MSGTYPE_SET_MASTER_LABEL:
-        memset(masterData.name, 0, sizeof(masterData.name));
-        strncpy(masterData.name, msgPtr->msg_set_master_label.str, MAX_TEXT_LEN);
-        //trimLabel(masterData.name, msgPtr->msg_set_master_label.strLen);
-        masterData.curCh = 0;
-        masterData.update = 1;
+        channel = CHANNEL_MASTER;
+        memset(chData[channel].name, 0, sizeof(chData[channel].name));
+        strncpy(chData[channel].name, msgPtr->msg_set_master_label.str, MAX_TEXT_LEN);
+        chData[channel].update = 1;
         break;
 
         case MSGTYPE_SET_CHANNEL_VOL_PREC:
         if(msgPtr->msg_set_channel_vol_prec.channel < NUM_CHANNELS)
         {
-            channel = msgPtr->msg_set_channel_vol_prec.channel;
+            channel = msgPtr->msg_set_channel_vol_prec.channel + CHANNEL_0;
             if( (msgPtr->msg_set_channel_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_channel_vol_prec.volVal <= MAXVOLVAL) )
             {
                 chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal;
                 chData[channel].update = 1;
+                encoderSet(channel, chData[channel].volVal);
             }
         }
         break;
@@ -479,31 +520,30 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         case MSGTYPE_SET_CHANNEL_LABEL:
         if(msgPtr->msg_set_channel_label.channel < NUM_CHANNELS)
         {
-            channel = msgPtr->msg_set_channel_label.channel;
+            channel = msgPtr->msg_set_channel_label.channel + CHANNEL_0;
             memset(chData[channel].name, 0, sizeof(chData[channel].name));
             strncpy(chData[channel].name, msgPtr->msg_set_channel_label.str, MAX_TEXT_LEN);
-            //trimLabel(chData[channel].name,  msgPtr->msg_set_channel_label.strLen);
-            chData[channel].curCh = 0;
             chData[channel].update = 1;
         }
         break;
 
         case MSGTYPE_SET_MASTER_ICON:
-        if(masterData.iconPtr)
+        channel = CHANNEL_MASTER;
+        if(chData[channel].iconPtr)
         {
-            free(masterData.iconPtr);
-            masterData.iconPtr = NULL;
+            free(chData[channel].iconPtr);
+            chData[channel].iconPtr = NULL;
         }
 
-        if(!masterData.iconPtr)
+        if(!chData[channel].iconPtr)
         {
-            masterData.iconPtr = (uint8_t*)malloc(dataLen);
+            chData[channel].iconPtr = (uint8_t*)malloc(dataLen);
         }
 
-        if(masterData.iconPtr)
+        if(chData[channel].iconPtr)
         {
-            memcpy(masterData.iconPtr, msgPtr->msg_set_master_icon.icon, dataLen);
-            masterData.update = 1;
+            memcpy(chData[channel].iconPtr, msgPtr->msg_set_master_icon.icon, dataLen);
+            chData[channel].update = 1;
         }
         break;
 
@@ -617,14 +657,33 @@ void decodeProtocol(void)
 **------------------------------------------------------------------------------
 ** selectBus:
 **
-** Changes the active I2C bus
+** Changes the active I2C bus by channel numbers
 **------------------------------------------------------------------------------
 */
-void selectBus(int8_t busno)
+void selectBus(int8_t ch)
 {
-    Wire.beginTransmission(0x70);
-    Wire.write(1 << busno);
-    Wire.endTransmission();
+    const int channel2bus[] =
+    {
+        1 << BUS_MASTER,
+        1 << BUS_0,
+        1 << BUS_1,
+        1 << BUS_2,
+        1 << BUS_3,
+        1 << BUS_4,
+        1 << BUS_5,
+        1 << BUS_6
+    };
+
+    static int8_t lastch = -1;
+
+    if(ch != lastch)
+    {
+        Wire.beginTransmission(0x70);
+        Wire.write(channel2bus[ch]);
+        Wire.endTransmission();
+
+        lastch = ch;
+    }
 }
 
 /*
@@ -640,50 +699,40 @@ void screenSaver(void)
 
     for ( i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
+        selectBus(i);
+        chData[i].display->clearDisplay();
+        chData[i].display->display();
+    }
+
+    i = CHANNEL_MASTER;
     selectBus(i);
     chData[i].display->clearDisplay();
     chData[i].display->display();
-    }
-    selectBus(MASTER);
-    masterData.display->clearDisplay();
-    masterData.display->display();
 }
 
 /*
 **------------------------------------------------------------------------------
-** checkAndSetVolVal:
+** pollEncs:
 **
-** Checks the provided encoder position for differences amd updates the volume
-** accordingly.
+** Checks the encoder interrupt pins for updates.
 **------------------------------------------------------------------------------
 */
-int checkAndSetVolVal(long newPosition, long *prevPosition, volume_t *volume)
+void pollEncs(void)
 {
-    long diff;
+    int i;
 
-    if (newPosition != *prevPosition)
+    for(i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
-        diff = *prevPosition - newPosition;
-
-        if(volume->volVal + diff > MAXVOLVAL)
+        if(!digitalRead(chData[i].encPin))
         {
-            volume->volVal = MAXVOLVAL;
+            chData[i].encUpdate = 1;
         }
-        else if(volume->volVal + diff <= 0)
-        {
-            volume->volVal = MINVOLVAL;
-        }
-        else
-        {
-            volume->volVal += diff;
-        }
-        volume->update = 1;
-
-        *prevPosition = newPosition;
-
-        return 1;
     }
-    return 0;
+
+    if(!digitalRead(chData[CHANNEL_MASTER].encPin))
+    {
+        chData[CHANNEL_MASTER].encUpdate = 1;
+    }
 }
 
 /*
@@ -727,69 +776,69 @@ void trimLabel(char * label, uint8_t len)
 #ifdef serialSendBuffer
 static void protocolTxData(void *dataPtr, int dataLength)
 {
-	int numData = 0;
-	int i;
-	int totalData = 0;
-	uint16_t checksum;
-	uint8_t *txBufPtr;
-	uint8_t *workBufPtr;
+    int numData = 0;
+    int i;
+    int totalData = 0;
+    uint16_t checksum;
+    uint8_t *txBufPtr;
+    uint8_t *workBufPtr;
 
-	//Fill the work buffer
-	workBufPtr = msgBuffer;
+    //Fill the work buffer
+    workBufPtr = msgBuffer;
 
-	//Start the message by adding the length
-	*((uint16_t*)workBufPtr) = dataLength;
-	numData += 2;
-	workBufPtr += 2;	//Jump to the first data byte
+    //Start the message by adding the length
+    *((uint16_t*)workBufPtr) = dataLength;
+    numData += 2;
+    workBufPtr += 2;	//Jump to the first data byte
 
-	//Copy the data
-	memcpy(workBufPtr, dataPtr, dataLength);
-	numData += dataLength;
-	workBufPtr += dataLength;	//Jump to the checksum
+    //Copy the data
+    memcpy(workBufPtr, dataPtr, dataLength);
+    numData += dataLength;
+    workBufPtr += dataLength;	//Jump to the checksum
 
-	//calculate the checksum
-	checksum = 0;
-	for (i = 0; i < numData; i++)
-	{
-		checksum ^= msgBuffer[i];
-	}
+    //calculate the checksum
+    checksum = 0;
+    for (i = 0; i < numData; i++)
+    {
+        checksum ^= msgBuffer[i];
+    }
 
-	//Add the checksum
-	*((uint16_t*)workBufPtr) = checksum;
-	numData += 2;
+    //Add the checksum
+    *((uint16_t*)workBufPtr) = checksum;
+    numData += 2;
 
 
-	//Start the TX buffer with STX
-	txBufPtr = txBuffer;
-	*txBufPtr++ = STX;
-	totalData++;
+    //Start the TX buffer with STX
+    txBufPtr = txBuffer;
+    *txBufPtr++ = STX;
+    totalData++;
 
-	//Copy data and check for reserved symbols and stuff if needed
-	for (i = 0; i < numData; i++)
-	{
-		switch (msgBuffer[i])
-		{
-		case STX:
-		case ETX:
-		case DLE:
-			//Reserved data, add a stuff byte and stuff the data
-			*txBufPtr++ = DLE;
-			totalData++;
-			*txBufPtr++ = msgBuffer[i] ^ 0x10;
-			break;
+    //Copy data and check for reserved symbols and stuff if needed
+    for (i = 0; i < numData; i++)
+    {
+        switch (msgBuffer[i])
+        {
+            case STX:
+            case ETX:
+            case DLE:
+            //Reserved data, add a stuff byte and stuff the data
+            *txBufPtr++ = DLE;
+            totalData++;
+            *txBufPtr++ = msgBuffer[i] ^ 0x10;
+            break;
 
-		default:
-			*txBufPtr++ = msgBuffer[i];
-			break;
-		}
-		totalData++;
-	}
+            default:
+            *txBufPtr++ = msgBuffer[i];
+            break;
+        }
+        totalData++;
+    }
 
-	//Finish off by adding the ETX
-	*txBufPtr++ = ETX;
-	totalData++;
+    //Finish off by adding the ETX
+    *txBufPtr++ = ETX;
+    totalData++;
 
-	serialSendBuffer(txBuffer, totalData);
+    serialSendBuffer(txBuffer, totalData);
 }
 #endif
 
@@ -804,11 +853,11 @@ void sendChannelUpdate(int8_t ch)
 {
     uint8_t msg[3] = {0};
     uint8_t len = 0;
-    
-    if(ch == MASTER)
+
+    if(ch == CHANNEL_MASTER)
     {
         msg[len++] = MSGTYPE_SET_MASTER_VOL_PREC;
-        msg[len++] = masterData.volVal;
+        msg[len++] = chData[CHANNEL_MASTER].volVal;
     }
     else
     {
@@ -818,4 +867,131 @@ void sendChannelUpdate(int8_t ch)
     }
 
     protocolTxData(msg, len);
+}
+
+/*
+**------------------------------------------------------------------------------
+** encoderSetup:
+**
+** Sets up the selected encoder
+**------------------------------------------------------------------------------
+*/
+void encoderSetup(int8_t ch, uint8_t volVal)
+{
+    conv_t tempval;
+
+    selectBus(ch);
+
+    //Set up general config and interrupts
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x00); //Select general configuration register
+    Wire.write(0x08);
+    Wire.endTransmission();
+
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x04); //Select general configuration register
+    Wire.write(0x19); //inc/dec interrupt
+    Wire.endTransmission();
+
+    //Set up min/max values
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x08); //Select counter value register
+
+    tempval.lval = volVal;
+    Wire.write(tempval.bval[3]); //Write the counter value
+    Wire.write(tempval.bval[2]); //Write the counter value
+    Wire.write(tempval.bval[1]); //Write the counter value
+    Wire.write(tempval.bval[0]); //Write the counter value
+
+    tempval.lval = MAXVOLVAL;
+    Wire.write(tempval.bval[3]); //Write the counter max value
+    Wire.write(tempval.bval[2]); //Write the counter max value
+    Wire.write(tempval.bval[1]); //Write the counter max value
+    Wire.write(tempval.bval[0]); //Write the counter max value
+
+    tempval.lval = MINVOLVAL;
+    Wire.write(tempval.bval[3]); //Write the counter min value
+    Wire.write(tempval.bval[2]); //Write the counter min value
+    Wire.write(tempval.bval[1]); //Write the counter min value
+    Wire.write(tempval.bval[0]); //Write the counter min value
+
+    Wire.write(0); //Write the increment step value
+    Wire.write(0); //Write the increment step value
+    Wire.write(0); //Write the increment step value
+    Wire.write(1); //Write the increment step value
+
+    Wire.endTransmission();
+
+}
+
+/*
+**------------------------------------------------------------------------------
+** encoderRead:
+**
+** Reads the current value of the selected encoder
+**------------------------------------------------------------------------------
+*/
+int32_t encoderRead(int8_t ch)
+{
+    int32_t pos;
+    uint8_t irq;
+
+    selectBus(ch);
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x08); //Select register
+    Wire.endTransmission();
+
+    pos = 0;
+    Wire.requestFrom(0, 4);    // request 4 bytes
+    if (Wire.available())
+    {
+        pos = Wire.read();
+        pos *= 256;
+        pos += Wire.read();
+        pos *= 256;
+        pos += Wire.read();
+        pos *= 256;
+        pos += Wire.read();
+    }
+    Wire.endTransmission();
+
+    //Clear eny interrupts
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x05); //Select register
+    Wire.endTransmission();
+
+    irq = 0;
+    Wire.requestFrom(0, 1);
+    if (Wire.available())
+    {
+        irq = Wire.read();
+    }
+
+    //Serial.println(pos);
+    return pos;
+}
+
+
+/*
+**------------------------------------------------------------------------------
+** encoderSet:
+**
+** Sets the current encoder value
+**------------------------------------------------------------------------------
+*/
+void encoderSet(int8_t ch, uint8_t val)
+{
+    conv_t tempval;
+
+    selectBus(ch);
+    Wire.beginTransmission(0); //address the encoder
+    Wire.write(0x08); //Select register
+
+    tempval.lval = val;
+    Wire.write(tempval.bval[3]); //Write the counter value
+    Wire.write(tempval.bval[2]); //Write the counter value
+    Wire.write(tempval.bval[1]); //Write the counter value
+    Wire.write(tempval.bval[0]); //Write the counter value
+
+    Wire.endTransmission();
 }
