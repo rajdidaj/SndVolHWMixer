@@ -21,6 +21,7 @@
 #include <Functiondiscoverykeys_devpkey.h>
 #include <conio.h>
 #include <list>
+#include <thread>
 
 #include "../../common/serialprotocol.h"
 
@@ -65,19 +66,19 @@ const uint8_t corsair[] =
 **------------------------------------------------------------------------------
 */
 typedef struct
-{
-	IAudioSessionControl	*pSessionControl;       //SessionControl for this stream
-	IAudioSessionControl2	*pSessionControl2;      //SessionControl2 for this stream
-	ISimpleAudioVolume		*pVolumeControl;        //AudioVolume for this stream
-	GUID					guid;                   //guid for this stream
+    {
+    IAudioSessionControl	*pSessionControl;       //SessionControl for this stream
+    IAudioSessionControl2	*pSessionControl2;      //SessionControl2 for this stream
+    ISimpleAudioVolume		*pVolumeControl;        //AudioVolume for this stream
+    GUID					guid;                   //guid for this stream
 
-	PWSTR					displayName;            //Obtained by IAudioSessionControl.GetDisplayName, don't forget to release after use
-	WCHAR					prettyName[MAX_PATH];   //Pretty name, the final name sent to the receiver
+    PWSTR					displayName;            //Obtained by IAudioSessionControl.GetDisplayName, don't forget to release after use
+    WCHAR					prettyName[MAX_PATH * 2]; //Pretty name, the final name sent to the receiver
 
     float                   prevVolume;             //previous volume value
     int                     update;                 //update flag
 
-}groupData_t;
+    }groupData_t;
 
 class Group
     {
@@ -104,14 +105,14 @@ class Group
             g.displayName = NULL;
             g.prettyName[0] = '\0';
             g.prevVolume = NAN;
-            g.update = true;            
+            g.update = true;
             }
 
         /*
         **----------------------------------------------------------------------
         ** freeAll method:
         **
-        ** Frees all objects associated with this group object (acquired by 
+        ** Frees all objects associated with this group object (acquired by
         ** getSessionData)
         **----------------------------------------------------------------------
         */
@@ -177,12 +178,14 @@ class Group
 ** Variables
 **------------------------------------------------------------------------------
 */
-using namespace std; 
-list <Group> groupList;          //Group data
+using namespace std;
+list <Group> groupList;                     //Group data
 
 int cport_nr = 5;                           //Serial port index
 int bdrate = 19200;                         //Baud rate
 wchar_t deviceName[MAX_PATH];               //Endpoint name
+int cPortOpen = 0;
+int cPortRxActive = 0;
 
 /*
 **------------------------------------------------------------------------------
@@ -196,6 +199,9 @@ void sendMasterInfo(float);
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t **);
+void serialRxCb(void);
+void getCmds(uint8_t *, uint16_t);
+void setGroupVolume(int, int);
 
 /*
 **------------------------------------------------------------------------------
@@ -209,14 +215,22 @@ void freeProtocolBuf(serialProtocol_t **);
 ** Callback functions
 **------------------------------------------------------------------------------
 */
+
+/*
+**------------------------------------------------------------------------------
+** EnumWindowsProcMy:
+**
+** Enumerates windows by PID
+**------------------------------------------------------------------------------
+*/
 HWND g_HWND = NULL;
 BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
-{
-	DWORD lpdwProcessId;
+    {
+    DWORD lpdwProcessId;
     g_HWND = NULL;
-	GetWindowThreadProcessId(hwnd, &lpdwProcessId);
-	if (lpdwProcessId == lParam)
-	{
+    GetWindowThreadProcessId(hwnd, &lpdwProcessId);
+    if (lpdwProcessId == lParam)
+        {
         //Find the top level
         while (1)
             {
@@ -229,11 +243,92 @@ BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
                 break;
                 }
             }
-		g_HWND = hwnd;
-		return FALSE;
-	}
-	return TRUE;
-}
+        g_HWND = hwnd;
+        return FALSE;
+        }
+    return TRUE;
+    }
+
+/*
+**------------------------------------------------------------------------------
+** serialRxCb:
+**
+** Polls the serial port for data
+**------------------------------------------------------------------------------
+*/
+thread serialRxThread(serialRxCb);
+void serialRxCb(void)
+    {
+    RS232_flushRXTX(cport_nr);
+
+    uint8_t ch;
+    static int msgLen = 0;
+    static msgState_t msgState = MSGSTATE_IDLE;
+    static uint8_t *msgPtr;
+
+    while (true)
+        {
+        if (cPortOpen && cPortRxActive)
+            {
+            if (RS232_PollComport(cport_nr, &ch, 1))
+                {             
+                
+                if (msgLen >= MAX_RXTX_BUFFER_LENGTH)
+                    {
+                    //Not enough room, stop
+                    msgState = MSGSTATE_IDLE;
+                    msgLen = 0;
+                    }
+
+                switch (ch)
+                    {
+                    case STX:
+                        //Message starting
+                        msgState = MSGSTATE_ACTIVE;
+                        msgLen = 0;
+                        msgPtr = rxBuffer;
+                        break;
+
+                    case ETX:
+                        //Message ending
+                        if (msgState == MSGSTATE_ACTIVE)
+                            {
+                            if (ctrlChecksum(rxBuffer))
+                                {
+                                getCmds(rxBuffer + 2, msgLen - 2);
+                                }
+                            msgState = MSGSTATE_IDLE;
+                            }
+                        break;
+
+                    case DLE:
+                        //Stuff byte
+                        if (MSGSTATE_ACTIVE)
+                            {
+                            msgState = MSGSTATE_DLE;
+                            }
+                        break;
+
+                    default:
+                        //Copy data
+                        if (msgState == MSGSTATE_DLE)
+                            {
+                            *msgPtr++ = ch ^ DLE;
+                            msgState = MSGSTATE_ACTIVE;
+                            msgLen++;
+                            }
+                        else if (msgState == MSGSTATE_ACTIVE)
+                            {
+                            *msgPtr++ = ch;
+                            msgLen++;
+                            }
+                        break;
+                    }
+                }
+            }
+        std::this_thread::yield();
+        }
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -241,40 +336,41 @@ BOOL CALLBACK EnumWindowsProcMy(HWND hwnd, LPARAM lParam)
 **------------------------------------------------------------------------------
 */
 int _tmain(int argc, _TCHAR* argv[])
-{
-	HRESULT hr;
-	
-	double newVolume;
-	int groupCount = 0;
-    
+    {
+    HRESULT hr;
+
+    double newVolume;
+    int groupCount = 0;
+
     int i = 0;
-	char mode[] = { '8','N','1',0 };
-	char str[2][512];
+    char mode[] = { '8','N','1',0 };
+    char str[2][512];
 
-	if (RS232_OpenComport(cport_nr, bdrate, mode))
-	{
-		printf("Can not open serial port\n");
-	}
-	else
-	{
-		printf("Serial port %d opened\n", cport_nr + 1);		
-        RS232_flushRXTX(cport_nr);
+    if (RS232_OpenComport(cport_nr, bdrate, mode))
+        {
+        printf("Can not open serial port\n");
+        }
+    else
+        {
+        printf("Serial port %d opened\n", cport_nr + 1);
+        cPortOpen = 1;
+
         Sleep(2000); //Wait for the arduino to reset
-	}
+        }
 
-	// -------------------------
-	CoInitialize(NULL);
-	IMMDeviceEnumerator *deviceEnumerator = NULL;
-	hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID *)&deviceEnumerator);
-	IMMDevice *defaultDevice = NULL;
+    // -------------------------
+    CoInitialize(NULL);
+    IMMDeviceEnumerator *deviceEnumerator = NULL;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID *)&deviceEnumerator);
+    IMMDevice *defaultDevice = NULL;
 
-	hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &defaultDevice);
-	deviceEnumerator->Release();
-	deviceEnumerator = NULL;
+    hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &defaultDevice);
+    deviceEnumerator->Release();
+    deviceEnumerator = NULL;
 
-	IAudioEndpointVolume *endpointVolume = NULL;
-	hr = defaultDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID *)&endpointVolume);
-    
+    IAudioEndpointVolume *endpointVolume = NULL;
+    hr = defaultDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID *)&endpointVolume);
+
     LPWSTR devID;
     IPropertyStore *pProps = NULL;
     hr = defaultDevice->GetId(&devID);
@@ -292,19 +388,19 @@ int _tmain(int argc, _TCHAR* argv[])
     wcscpy_s(deviceName, varName.pwszVal);
 
 
-	// ---------------------------
-	// Get the session managers for the endpoint device.	
-	IAudioSessionManager2 *pManager2 = NULL;
-	hr = defaultDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER, NULL, (void**)&pManager2);
+    // ---------------------------
+    // Get the session managers for the endpoint device.	
+    IAudioSessionManager2 *pManager2 = NULL;
+    hr = defaultDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER, NULL, (void**)&pManager2);
 
-	//Release the device, we have what we need
-	defaultDevice->Release();
-	defaultDevice = NULL;
+    //Release the device, we have what we need
+    defaultDevice->Release();
+    defaultDevice = NULL;
 
     //get the sessionenumerator
     IAudioSessionEnumerator *pEnumerator = NULL;
     hr = pManager2->GetSessionEnumerator(&pEnumerator);
-
+        
     float lastVolume = -1;
 
     //Enter main loop
@@ -333,19 +429,24 @@ int _tmain(int argc, _TCHAR* argv[])
             sendChannelInfo(i, -1);
             }
 
-        Sleep(200);
+        Sleep(2000);
+
+        if (cPortOpen)
+            {
+            cPortRxActive = 1;
+            }
         }
 
-	//Clean up
-	endpointVolume->Release();
-	pEnumerator->Release();
-	pManager2->Release();
+    //Clean up
+    endpointVolume->Release();
+    pEnumerator->Release();
+    pManager2->Release();
 
-	RS232_CloseComport(cport_nr);
+    RS232_CloseComport(cport_nr);
 
-	CoUninitialize();
-	return 0;
-}
+    CoUninitialize();
+    return 0;
+    }
 
 
 /*
@@ -356,19 +457,19 @@ int _tmain(int argc, _TCHAR* argv[])
 **------------------------------------------------------------------------------
 */
 int getGroups(IAudioSessionEnumerator *pEnumerator)
-{
-	HRESULT hr;
-	int currentStreamCount = 0;    
+    {
+    HRESULT hr;
+    int currentStreamCount = 0;
 
-	hr = pEnumerator->GetCount(&currentStreamCount);
+    hr = pEnumerator->GetCount(&currentStreamCount);
 
-	printf("Current number of streams %d\n", currentStreamCount);
+    printf("Current number of streams %d\n", currentStreamCount);
 
     //Get guids of all streams    
     for (int i = 0; i < currentStreamCount; i++)
         {
-        Group group;             
-       
+        Group group;
+
         //Get guid, sessioncontrol, sessioncontrol2, etc...
         group.getSessionData(pEnumerator, i);
 
@@ -382,12 +483,12 @@ int getGroups(IAudioSessionEnumerator *pEnumerator)
     int dupe = 0;
 
     //Iterate through the list of streams
-    for (grp = groupList.begin() ; grp != groupList.end() ; grp++, dupe++)
+    for (grp = groupList.begin(); grp != groupList.end(); grp++, dupe++)
         {
         //Compare grp to all other list items, except null guids
-        for (cmp = groupList.begin(); cmp != groupList.end() ; cmp++)
+        for (cmp = groupList.begin(); cmp != groupList.end(); cmp++)
             {
-            if ( ((*cmp).g.guid != GUID_NULL) && (cmp != grp) && IsEqualGUID((*grp).g.guid, (*cmp).g.guid) )
+            if (((*cmp).g.guid != GUID_NULL) && (cmp != grp) && IsEqualGUID((*grp).g.guid, (*cmp).g.guid))
                 {
                 //Mark the duplicate
                 (*cmp).duplicate = dupe;
@@ -403,7 +504,7 @@ int getGroups(IAudioSessionEnumerator *pEnumerator)
             {
             cmp = grp;
 
-            for (cmp++ ; cmp != groupList.end(); cmp++)
+            for (cmp++; cmp != groupList.end(); cmp++)
                 {
                 if ((*cmp).duplicate == dupe)
                     {
@@ -412,19 +513,19 @@ int getGroups(IAudioSessionEnumerator *pEnumerator)
 
                     //Remove the duplicate list item
                     groupList.erase(cmp);
-                    
+
                     //cmp is now invalid, so restart at grp+1
                     cmp = grp;
                     cmp++;
                     }
                 }
-            }        
+            }
         }
 
     printf("Current number of groups %d\n", groupList.size());
 
     return groupList.size();
-}
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -434,118 +535,118 @@ int getGroups(IAudioSessionEnumerator *pEnumerator)
 **------------------------------------------------------------------------------
 */
 void getLabels(void)
-{
-	HRESULT hr;
+    {
+    HRESULT hr;
     int label;
     list <Group>::iterator grp;
 
-	//Find the groups that fo not have a good label already
-	for (grp = groupList.begin() ; grp != groupList.end() ; grp++)
-	{
+    //Find the groups that fo not have a good label already
+    for (grp = groupList.begin(); grp != groupList.end(); grp++)
+        {
         label = 0;
-		if (!wcscmp((*grp).g.displayName, L""))
-		{
+        if (!wcscmp((*grp).g.displayName, L""))
+            {
             OLECHAR* guidString;
             StringFromCLSID((*grp).g.guid, &guidString);
 
-			printf("Group %S has no label", guidString);
+            printf("Group %S has no label", guidString);
 
             CoTaskMemFree(guidString);
-		}
-		else
-		{
+            }
+        else
+            {
 
             OLECHAR* guidString;
-            StringFromCLSID((*grp).g.guid, &guidString);            
+            StringFromCLSID((*grp).g.guid, &guidString);
 
-			printf("Group %S has a label: \"%S\"", guidString, (*grp).g.displayName);
+            printf("Group %S has a label: \"%S\"", guidString, (*grp).g.displayName);
 
             CoTaskMemFree(guidString);
 
-			wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), (*grp).g.displayName);
+            wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), (*grp).g.displayName);
             label = 1;
 
             if (wcsstr((*grp).g.prettyName, L"AudioSrv.Dll") != NULL)
                 {
                 wsprintfW((*grp).g.prettyName, L"System Sounds");
                 }
-		}
-        
+            }
+
         //Get process id
-		DWORD pid;
-		hr = (*grp).g.pSessionControl2->GetProcessId(&pid);
-        
+        DWORD pid;
+        hr = (*grp).g.pSessionControl2->GetProcessId(&pid);
+
         //Get imagename
-		HANDLE Handle = OpenProcess(
-			PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-			FALSE,
-			pid
-		);
-		if (Handle)
-		{
-			WCHAR Buffer[MAX_PATH];
-			if (GetProcessImageFileNameW(Handle, Buffer, _countof(Buffer)))
-			{
+        HANDLE Handle = OpenProcess(
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+            FALSE,
+            pid
+        );
+        if (Handle)
+            {
+            WCHAR Buffer[MAX_PATH];
+            if (GetProcessImageFileNameW(Handle, Buffer, _countof(Buffer)))
+                {
 
-				//WCHAR label[MAX_PATH];
-				//hr = GetWindowText((HWND)Handle, label, _countof(label));
-				// At this point, buffer contains the full path to the executable
-				//printf("%S, ", Buffer);
+                //WCHAR label[MAX_PATH];
+                //hr = GetWindowText((HWND)Handle, label, _countof(label));
+                // At this point, buffer contains the full path to the executable
+                //printf("%S, ", Buffer);
 
-				wchar_t *res_p;
-				TCHAR fullpath[MAX_PATH];
-				res_p = _wfullpath(fullpath, Buffer, _countof(fullpath));
-                
-				//printf("%S, ", fullpath);
+                wchar_t *res_p;
+                TCHAR fullpath[MAX_PATH];
+                res_p = _wfullpath(fullpath, Buffer, _countof(fullpath));
 
-				TCHAR drive[3];
-				TCHAR dir[256];
-				TCHAR fname[256];
-				TCHAR ext[256];
-				_tsplitpath_s(
-					fullpath,
-					drive,
-					_countof(drive),
-					dir,
-					_countof(dir),
-					fname,
-					_countof(fname),
-					ext,
-					_countof(ext));
-				printf(", executable name: \"%S\"", fname);
+                //printf("%S, ", fullpath);
 
-				if (wcslen(fname) && !label)
-				{
-					wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), fname);
-					memset(fname, 0, sizeof(fname));
-				}
+                TCHAR drive[3];
+                TCHAR dir[256];
+                TCHAR fname[256];
+                TCHAR ext[256];
+                _tsplitpath_s(
+                    fullpath,
+                    drive,
+                    _countof(drive),
+                    dir,
+                    _countof(dir),
+                    fname,
+                    _countof(fname),
+                    ext,
+                    _countof(ext));
+                printf(", executable name: \"%S\"", fname);
 
-				if (!EnumWindows(EnumWindowsProcMy, pid))
-				{
-					if (GetWindowText(g_HWND, Buffer, _countof(Buffer)))
-					{
-						printf(", window text: \"%S\"", Buffer);
-						if (wcslen(Buffer))
-						{
-							wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), Buffer);
-							memset(Buffer, 0, sizeof(Buffer));
-						}
-					}
-				}		
-			}
-			else
-			{
-				// You better call GetLastError() here
-			}
-			CloseHandle(Handle);
-		}
+                if (wcslen(fname) && !label)
+                    {
+                    wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), fname);
+                    memset(fname, 0, sizeof(fname));
+                    }
+
+                if (!EnumWindows(EnumWindowsProcMy, pid))
+                    {
+                    if (GetWindowText(g_HWND, Buffer, _countof(Buffer)))
+                        {
+                        printf(", window text: \"%S\"", Buffer);
+                        if (wcslen(Buffer))
+                            {
+                            wcscpy_s((*grp).g.prettyName, _countof((*grp).g.prettyName), Buffer);
+                            memset(Buffer, 0, sizeof(Buffer));
+                            }
+                        }
+                    }
+                }
+            else
+                {
+                // You better call GetLastError() here
+                }
+            CloseHandle(Handle);
+            }
 
         (*grp).g.update = true;
 
-		printf(", prettyName: \"%S\"", (*grp).g.prettyName);
-		printf("\n");
-	}
-}
+        printf(", prettyName: \"%S\"", (*grp).g.prettyName);
+        printf("\n");
+        }
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -555,27 +656,27 @@ void getLabels(void)
 **------------------------------------------------------------------------------
 */
 void sendChannelInfo(int ch, float masterVolume)
-{
-	size_t numconv;
-	char charName[32 * 2];
-	uint8_t vol;
-	float fvol;
-	serialProtocol_t *msg;
+    {
+    size_t numconv;
+    char charName[64];
+    uint8_t vol;
+    float fvol;
+    serialProtocol_t *msg;
     int chnum = ch;
 
     list <Group>::iterator i;
-    for (i = groupList.begin(); ch ; i++, ch--)
+    for (i = groupList.begin(); ch; i++, ch--)
         {
         //do nothing
         }
 
-	(*i).g.pVolumeControl->GetMasterVolume(&fvol);
+    (*i).g.pVolumeControl->GetMasterVolume(&fvol);
     if (fvol != (*i).g.prevVolume)
         {
         (*i).g.update = 1;
         (*i).g.prevVolume = fvol;
         }
-    
+
     if ((*i).g.update)
         {
         (*i).g.update = false;
@@ -592,7 +693,7 @@ void sendChannelInfo(int ch, float masterVolume)
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
-        wcstombs_s(&numconv, charName, (*i).g.prettyName, sizeof(charName));
+        wcstombs_s(&numconv, charName, (*i).g.prettyName, _countof(charName));
         charName[sizeof(charName) - 1] = 0;
 
         int len = sizeof(struct msg_set_channel_label) + strlen(charName) + 1;
@@ -604,7 +705,7 @@ void sendChannelInfo(int ch, float masterVolume)
         protocolTxData(msg, len);
         freeProtocolBuf(&msg);
         }
-}
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -614,14 +715,14 @@ void sendChannelInfo(int ch, float masterVolume)
 **------------------------------------------------------------------------------
 */
 void sendMasterInfo(float fvol)
-{
+    {
     char charName[32 * 2];
     size_t numconv;
 
-	serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));	
-	msg->msg_set_master_vol_prec.volVal = fvol;
-	protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
-	freeProtocolBuf(&msg);
+    serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));
+    msg->msg_set_master_vol_prec.volVal = fvol;
+    protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
+    freeProtocolBuf(&msg);
 
     int size = sizeof(struct msg_set_master_icon) + sizeof(corsair);
     msg = allocProtocolBuf(MSGTYPE_SET_MASTER_ICON, size);
@@ -634,13 +735,13 @@ void sendMasterInfo(float fvol)
 
     int len = sizeof(struct msg_set_master_label) + strlen(charName) + 1;
     msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, len);
-    memcpy_s(msg->msg_set_master_label.str, strlen(charName) + 1, charName, strlen(charName)+1);
+    memcpy_s(msg->msg_set_master_label.str, strlen(charName) + 1, charName, strlen(charName) + 1);
     msg->msg_set_master_label.strLen = strlen(charName);
 
     protocolTxData(msg, len);
     freeProtocolBuf(&msg);
 
-}
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -650,15 +751,15 @@ void sendMasterInfo(float fvol)
 **------------------------------------------------------------------------------
 */
 serialProtocol_t * allocProtocolBuf(msgtype_t msgType, size_t bytes)
-{
-	serialProtocol_t *blockPtr = 0;
+    {
+    serialProtocol_t *blockPtr = 0;
 
-	blockPtr = (serialProtocol_t*)malloc(bytes);
+    blockPtr = (serialProtocol_t*)malloc(bytes);
 
-	blockPtr->msgType = msgType;
+    blockPtr->msgType = msgType;
 
-	return blockPtr;
-}
+    return blockPtr;
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -668,10 +769,10 @@ serialProtocol_t * allocProtocolBuf(msgtype_t msgType, size_t bytes)
 **------------------------------------------------------------------------------
 */
 void freeProtocolBuf(serialProtocol_t **blockBtr)
-{
-	free(*blockBtr);
+    {
+    free(*blockBtr);
     *blockBtr = NULL;
-}
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -682,69 +783,163 @@ void freeProtocolBuf(serialProtocol_t **blockBtr)
 */
 #ifdef serialSendBuffer
 static void protocolTxData(void *dataPtr, int dataLength)
-{
-	int numData = 0;
-	int i;
-	int totalData = 0;
-	uint16_t checksum;
-	uint8_t *txBufPtr;
-	uint8_t *workBufPtr;
-		
-	//Fill the work buffer
-	workBufPtr = msgBuffer;
+    {
+    int numData = 0;
+    int i;
+    int totalData = 0;
+    uint16_t checksum;
+    uint8_t *txBufPtr;
+    uint8_t *workBufPtr;
 
-	//Start the message by adding the length
-	*((uint16_t*)workBufPtr) = dataLength;
-	numData += 2;
-	workBufPtr += 2;	//Jump to the first data byte
-	
-	//Copy the data
-	memcpy_s(workBufPtr, sizeof(msgBuffer) - numData, dataPtr, dataLength);
-	numData += dataLength;
-	workBufPtr += dataLength;	//Jump to the checksum
+    //Fill the work buffer
+    workBufPtr = msgBuffer;
 
-	//calculate the checksum
-	checksum = 0;
-	for (i = 0; i < numData; i++)
-	{
-		checksum ^= msgBuffer[i];
-	}
+    //Start the message by adding the length
+    *((uint16_t*)workBufPtr) = dataLength;
+    numData += 2;
+    workBufPtr += 2;	//Jump to the first data byte
 
-	//Add the checksum
-	*((uint16_t*)workBufPtr) = checksum;
-	numData += 2;
-	
+    //Copy the data
+    memcpy_s(workBufPtr, sizeof(msgBuffer) - numData, dataPtr, dataLength);
+    numData += dataLength;
+    workBufPtr += dataLength;	//Jump to the checksum
 
-	//Start the TX buffer with STX
-	txBufPtr = txBuffer;
-	*txBufPtr++ = STX;
-	totalData++;
+    //calculate the checksum
+    checksum = 0;
+    for (i = 0; i < numData; i++)
+        {
+        checksum ^= msgBuffer[i];
+        }
 
-	//Copy data and check for reserved symbols and stuff if needed
-	for (i = 0; i < numData; i++)
-	{
-		switch (msgBuffer[i])
-		{
-		case STX:
-		case ETX:
-		case DLE:
-			//Reserved data, add a stuff byte and stuff the data
-			*txBufPtr++ = DLE;
-			totalData++;
-			*txBufPtr++ = msgBuffer[i] ^ 0x10;
-			break;
+    //Add the checksum
+    *((uint16_t*)workBufPtr) = checksum;
+    numData += 2;
 
-		default:
-			*txBufPtr++ = msgBuffer[i];
-			break;
-		}
-		totalData++;
-	}
 
-	//Finish off by adding the ETX
-	*txBufPtr++ = ETX;
-	totalData++;
-	   
-	serialSendBuffer(txBuffer, totalData);
-}
+    //Start the TX buffer with STX
+    txBufPtr = txBuffer;
+    *txBufPtr++ = STX;
+    totalData++;
+
+    //Copy data and check for reserved symbols and stuff if needed
+    for (i = 0; i < numData; i++)
+        {
+        switch (msgBuffer[i])
+            {
+            case STX:
+            case ETX:
+            case DLE:
+                //Reserved data, add a stuff byte and stuff the data
+                *txBufPtr++ = DLE;
+                totalData++;
+                *txBufPtr++ = msgBuffer[i] ^ 0x10;
+                break;
+
+            default:
+                *txBufPtr++ = msgBuffer[i];
+                break;
+            }
+        totalData++;
+        }
+
+    //Finish off by adding the ETX
+    *txBufPtr++ = ETX;
+    totalData++;
+
+    serialSendBuffer(txBuffer, totalData);
+    }
 #endif
+
+
+/*
+**------------------------------------------------------------------------------
+** getCmds:
+**
+** Acts on the commands received on serial
+**------------------------------------------------------------------------------
+*/
+void getCmds(uint8_t *pMsgBuf, uint16_t dataLen)
+    {
+    serialProtocol_t *msgPtr = (serialProtocol_t*)pMsgBuf;
+    int channel;
+
+    switch (msgPtr->msgType)
+        {
+        case MSGTYPE_SET_MASTER_VOL_PREC:
+            /*if ((msgPtr->msg_set_master_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_master_vol_prec.volVal <= MAXVOLVAL))
+                {
+
+                }*/
+            printf("New master vol: %d\n", msgPtr->msg_set_master_vol_prec.volVal);
+            
+            break;
+                  
+        case MSGTYPE_SET_CHANNEL_VOL_PREC:
+            /*if (msgPtr->msg_set_channel_vol_prec.channel < NUM_CHANNELS)
+                {
+                channel = msgPtr->msg_set_channel_vol_prec.channel - 1;
+                if ((msgPtr->msg_set_channel_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_channel_vol_prec.volVal <= MAXVOLVAL))
+                    {
+
+                    }
+                }*/
+            
+            setGroupVolume(msgPtr->msg_set_channel_vol_prec.channel, msgPtr->msg_set_channel_vol_prec.volVal);
+            break;                
+        
+        default:
+            break;
+        }
+    }
+
+/*
+**------------------------------------------------------------------------------
+** ctrlChecksum:
+**
+** Checks the received checksum
+**------------------------------------------------------------------------------
+*/
+bool ctrlChecksum(uint8_t *pMsgBuf)
+    {
+    uint16_t len = *(uint16_t*)pMsgBuf;
+    uint16_t check = *(uint16_t*)&pMsgBuf[len + 2];
+    uint16_t sum = 0;
+    unsigned int i;
+
+    for (i = 0; i < len + 2; i++)
+        {
+        sum ^= pMsgBuf[i];
+        }
+
+    if (check == sum)
+        {
+        return 1;
+        }
+    else
+        {
+        return 0;
+        }
+    }
+
+/*
+**------------------------------------------------------------------------------
+** setGroupVolume:
+**
+** Sets the referenced groups volume
+**------------------------------------------------------------------------------
+*/
+void setGroupVolume(int ch, int percent)
+    {
+    float fvol = percent / 100.0;
+    printf("New group %d vol: %d\n", ch, percent);
+
+    list <Group>::iterator i;
+    for (i = groupList.begin(); ch; i++, ch--)
+        {
+        //do nothing
+        }
+
+    LPCGUID pGuid;
+    (*i).g.pVolumeControl->SetMasterVolume(fvol, &(*i).g.guid);
+    (*i).g.prevVolume = fvol;
+    }

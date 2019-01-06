@@ -81,6 +81,7 @@ void protocolTxData(void *, int);	//Use this to send a known number of data byte
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t *);
+bool ctrlChecksum(uint8_t *);
 
 // --------------------- Serial Protocol end ----------------------
 

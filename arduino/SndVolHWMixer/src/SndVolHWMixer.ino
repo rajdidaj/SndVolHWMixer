@@ -867,7 +867,7 @@ void sendChannelUpdate(int8_t ch)
     else
     {
         msg[len++] = MSGTYPE_SET_CHANNEL_VOL_PREC;
-        msg[len++] = ch;
+        msg[len++] = ch - CHANNEL_0;
         msg[len++] = chData[ch].volVal;
     }
 
