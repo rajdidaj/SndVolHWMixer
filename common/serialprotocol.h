@@ -37,6 +37,7 @@ struct msg_set_master_vol_prec
 {
     msgtype_t msgType;
     uint8_t volVal;
+    uint8_t muteStatus;
 };
 
 struct msg_set_master_label
@@ -51,6 +52,7 @@ struct msg_set_channel_vol_prec
     msgtype_t msgType;
     uint8_t channel;
     uint8_t volVal;
+    uint8_t muteStatus;
 };
 
 struct msg_set_channel_label

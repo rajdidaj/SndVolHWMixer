@@ -84,6 +84,7 @@ typedef struct
     uint8_t update;
     uint8_t scrolling;
     uint8_t volVal;
+    uint8_t muteStatus;
     char name[MAX_TEXT_LEN + 1];
     char scrname[MAX_TEXT_ONSCREEN + 1];
     unsigned char curCh;
@@ -149,7 +150,7 @@ void setup()
         chData[i].update = 1;
         chData[i].display = &display;
         chData[i].display->clearDisplay();
-        //chData[i].display->display();
+        chData[i].display->display();
 
         chData[i].display->setTextSize(1);      // Normal 1:1 pixel scale
         chData[i].display->setTextColor(WHITE); // Draw white text
@@ -162,6 +163,8 @@ void setup()
         chData[i].encWriteUpdate = 1;
         encoderSetup(i, chData[i].volVal);
         pinMode(irqPins[i], INPUT_PULLUP);
+
+        chData[i].muteStatus = 0;
         chData[i].active = 0;
     }
 
@@ -189,6 +192,8 @@ void setup()
     chData[i].encWriteUpdate = 1;
     encoderSetup(i, chData[i].volVal);
     pinMode(irqPins[i], INPUT_PULLUP);
+
+    chData[i].muteStatus = 0;
     chData[i].active = 0;
 }
 
@@ -445,7 +450,7 @@ void drawBar(volume_t *vP)
 */
 void drawVolIcon(volume_t *vP)
 {
-    if(!vP->volVal)
+    if(vP->muteStatus)
     {
         vP->display->drawBitmap(108, 14, speaker_mute, SPEAKERICON_WIDTH, SPEAKERICON_HEIGHT, WHITE);
         return;
@@ -503,6 +508,8 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
         {
             channel = CHANNEL_MASTER;
             chData[channel].volVal = msgPtr->msg_set_master_vol_prec.volVal;
+            chData[channel].muteStatus = msgPtr->msg_set_master_vol_prec.muteStatus;
+
             chData[channel].update = 1;
             encoderSet(channel, chData[channel].volVal);
             chData[channel].active = 1;
@@ -523,6 +530,8 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
             if( (msgPtr->msg_set_channel_vol_prec.volVal >= MINVOLVAL) && (msgPtr->msg_set_channel_vol_prec.volVal <= MAXVOLVAL) )
             {
                 chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal;
+                chData[channel].muteStatus = msgPtr->msg_set_channel_vol_prec.muteStatus;
+
                 chData[channel].update = 1;
                 encoderSet(channel, chData[channel].volVal);
                 chData[channel].active = 1;
@@ -879,12 +888,14 @@ void sendChannelUpdate(int8_t ch)
     {
         msg[len++] = MSGTYPE_SET_MASTER_VOL_PREC;
         msg[len++] = chData[CHANNEL_MASTER].volVal;
+        msg[len++] = chData[CHANNEL_MASTER].muteStatus;
     }
     else
     {
         msg[len++] = MSGTYPE_SET_CHANNEL_VOL_PREC;
         msg[len++] = ch - CHANNEL_0;
         msg[len++] = chData[ch].volVal;
+        msg[len++] = chData[ch].muteStatus;
     }
 
     protocolTxData(msg, len);
@@ -999,6 +1010,14 @@ void encoderRead(int8_t ch, volume_t *vP)
     //Button released
     if(irq & 1)
     {
+        if(vP->muteStatus)
+        {
+            vP->muteStatus = 0;
+        }
+        else
+        {
+            vP->muteStatus = 1;
+        }
         vP->update = 1;
     }
 }

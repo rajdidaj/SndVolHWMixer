@@ -66,6 +66,18 @@ const uint8_t corsair[] =
 **------------------------------------------------------------------------------
 */
 typedef struct
+    {    
+    IAudioEndpointVolume    *pEndpointVolume;
+    IAudioSessionEnumerator *pSessionEnumerator;
+    GUID					guid;                   //guid for this device
+    WCHAR					deviceName[MAX_PATH * 2]; //Pretty name, the final name sent to the receiver
+
+    float                   prevVolume;             //previous volume value
+    BOOL                    prevMute;               //previous mute status
+    int                     update;                 //update flag
+    }deviceData_t;
+
+typedef struct
     {
     IAudioSessionControl	*pSessionControl;       //SessionControl for this stream
     IAudioSessionControl2	*pSessionControl2;      //SessionControl2 for this stream
@@ -76,9 +88,11 @@ typedef struct
     WCHAR					prettyName[MAX_PATH * 2]; //Pretty name, the final name sent to the receiver
 
     float                   prevVolume;             //previous volume value
+    BOOL                    prevMute;               //previous mute status
     int                     update;                 //update flag
 
     }groupData_t;
+
 
 class Group
     {
@@ -105,6 +119,7 @@ class Group
             g.displayName = NULL;
             g.prettyName[0] = '\0';
             g.prevVolume = NAN;
+            g.prevMute = -1;
             g.update = true;
             }
 
@@ -180,10 +195,10 @@ class Group
 */
 using namespace std;
 list <Group> groupList;                     //Group data
+deviceData_t deviceData;
 
 int cport_nr = 5;                           //Serial port index
 int bdrate = 19200;                         //Baud rate
-wchar_t deviceName[MAX_PATH];               //Endpoint name
 int cPortOpen = 0;
 int cPortRxActive = 0;
 
@@ -192,16 +207,18 @@ int cPortRxActive = 0;
 ** Function prototypes
 **------------------------------------------------------------------------------
 */
+HRESULT initDevice(deviceData_t *);
 int getGroups(IAudioSessionEnumerator *);
 void getLabels(void);
 void sendChannelInfo(int, float);
-void sendMasterInfo(float);
+void sendMasterInfo(void);
 
 serialProtocol_t * allocProtocolBuf(msgtype_t, size_t);
 void freeProtocolBuf(serialProtocol_t **);
 void serialRxCb(void);
 void getCmds(uint8_t *, uint16_t);
-void setGroupVolume(int, int);
+void setGroupVolume(int, int, int);
+void setMasterVolume(int, int);
 
 /*
 **------------------------------------------------------------------------------
@@ -358,67 +375,17 @@ int _tmain(int argc, _TCHAR* argv[])
         Sleep(2000); //Wait for the arduino to reset
         }
 
-    // -------------------------
-    CoInitialize(NULL);
-    IMMDeviceEnumerator *deviceEnumerator = NULL;
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID *)&deviceEnumerator);
-    IMMDevice *defaultDevice = NULL;
-
-    hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &defaultDevice);
-    deviceEnumerator->Release();
-    deviceEnumerator = NULL;
-
-    IAudioEndpointVolume *endpointVolume = NULL;
-    hr = defaultDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID *)&endpointVolume);
-
-    LPWSTR devID;
-    IPropertyStore *pProps = NULL;
-    hr = defaultDevice->GetId(&devID);
-
-    hr = defaultDevice->OpenPropertyStore(
-        STGM_READ, &pProps);
-
-    PROPVARIANT varName;
-    // Initialize container for property value.
-    PropVariantInit(&varName);
-
-    // Get the endpoint's friendly-name property.
-    hr = pProps->GetValue(
-        PKEY_Device_FriendlyName, &varName);
-    wcscpy_s(deviceName, varName.pwszVal);
-
-
-    // ---------------------------
-    // Get the session managers for the endpoint device.	
-    IAudioSessionManager2 *pManager2 = NULL;
-    hr = defaultDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER, NULL, (void**)&pManager2);
-
-    //Release the device, we have what we need
-    defaultDevice->Release();
-    defaultDevice = NULL;
-
-    //get the sessionenumerator
-    IAudioSessionEnumerator *pEnumerator = NULL;
-    hr = pManager2->GetSessionEnumerator(&pEnumerator);
-        
-    float lastVolume = -1;
+    hr = initDevice(&deviceData);
+      
 
     //Enter main loop
     while (!_kbhit())
         {
         // Master volume
-        float currentVolume = 0;
-
-        hr = endpointVolume->GetMasterVolumeLevelScalar(&currentVolume);
-        printf("Current volume as a scalar is: %f\n", currentVolume);
-        if (currentVolume != lastVolume)
-            {
-            sendMasterInfo(currentVolume * 100);
-            lastVolume = currentVolume;
-            }
-
+        sendMasterInfo();
+                
         //Get data and list info about streams		
-        groupCount = getGroups(pEnumerator);
+        groupCount = getGroups(deviceData.pSessionEnumerator);
 
         getLabels();
 
@@ -438,9 +405,8 @@ int _tmain(int argc, _TCHAR* argv[])
         }
 
     //Clean up
-    endpointVolume->Release();
-    pEnumerator->Release();
-    pManager2->Release();
+    deviceData.pEndpointVolume->Release();
+    deviceData.pSessionEnumerator->Release();        
 
     RS232_CloseComport(cport_nr);
 
@@ -448,6 +414,86 @@ int _tmain(int argc, _TCHAR* argv[])
     return 0;
     }
 
+
+/*
+**------------------------------------------------------------------------------
+** initDevice:
+**
+** Initializes the audio endpoint
+**------------------------------------------------------------------------------
+*/
+HRESULT initDevice(deviceData_t *dev)
+    {
+    HRESULT hr;
+
+    /*
+    **--------------------------------------------------------------------------
+    ** Get the device instance
+    **--------------------------------------------------------------------------
+    */
+    CoInitialize(NULL);
+    IMMDeviceEnumerator *deviceEnumerator = NULL;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (LPVOID *)&deviceEnumerator);
+    IMMDevice *defaultDevice = NULL;
+    hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &defaultDevice);
+    deviceEnumerator->Release(); //Enumerator is no longer needed
+    deviceEnumerator = NULL;
+
+    /*
+    **--------------------------------------------------------------------------
+    ** Get the volume control
+    **--------------------------------------------------------------------------
+    */
+    dev->pEndpointVolume = NULL;
+    hr = defaultDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, NULL, (LPVOID *)&dev->pEndpointVolume);
+
+    /*
+    **--------------------------------------------------------------------------
+    ** Get the device name
+    **--------------------------------------------------------------------------
+    */
+    LPWSTR devID;
+    IPropertyStore *pProps = NULL;
+    hr = defaultDevice->GetId(&devID);
+
+    hr = defaultDevice->OpenPropertyStore(
+        STGM_READ, &pProps);
+
+    PROPVARIANT varName;
+    // Initialize container for property value.
+    PropVariantInit(&varName);
+
+    // Get the endpoint's friendly-name property.
+    hr = pProps->GetValue(
+        PKEY_Device_FriendlyName, &varName);
+    wcscpy_s(dev->deviceName, varName.pwszVal);
+
+    /*
+    **--------------------------------------------------------------------------
+    ** Get the session manager, to get streams later
+    **--------------------------------------------------------------------------
+    */
+    IAudioSessionManager2 *pSessionManager;
+    pSessionManager = NULL;
+    hr = defaultDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER, NULL, (void**)&pSessionManager);
+
+    dev->guid = GUID_NULL;
+
+    //Release the device, we have what we need
+    defaultDevice->Release();
+    defaultDevice = NULL;
+
+    //get the sessionenumerator
+    dev->pSessionEnumerator = NULL;
+    hr = pSessionManager->GetSessionEnumerator(&dev->pSessionEnumerator);
+
+    pSessionManager->Release();
+
+    dev->prevVolume = NAN;
+    dev->prevMute = -1;
+
+    return S_OK;
+    }
 
 /*
 **------------------------------------------------------------------------------
@@ -660,6 +706,7 @@ void sendChannelInfo(int ch, float masterVolume)
     size_t numconv;
     char charName[64+1];
     uint8_t vol;
+    BOOL mute;
     float fvol;
     serialProtocol_t *msg;
     int chnum = ch;
@@ -673,8 +720,15 @@ void sendChannelInfo(int ch, float masterVolume)
     (*i).g.pVolumeControl->GetMasterVolume(&fvol);
     if (fvol != (*i).g.prevVolume)
         {
-        (*i).g.update = 1;
+        (*i).g.update = true;
         (*i).g.prevVolume = fvol;
+        }
+
+    (*i).g.pVolumeControl->GetMute(&mute);
+    if (mute != (*i).g.prevMute)
+        {
+        (*i).g.update = true;
+        (*i).g.prevMute = mute;
         }
 
     if ((*i).g.update)
@@ -690,6 +744,7 @@ void sendChannelInfo(int ch, float masterVolume)
         msg = allocProtocolBuf(MSGTYPE_SET_CHANNEL_VOL_PREC, sizeof(struct msg_set_channel_vol_prec));
         msg->msg_set_channel_vol_prec.channel = chnum;
         msg->msg_set_channel_vol_prec.volVal = vol;
+        msg->msg_set_channel_vol_prec.muteStatus = mute;
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
@@ -714,33 +769,51 @@ void sendChannelInfo(int ch, float masterVolume)
 ** Sends the audio endpoint master volume to the receiver
 **------------------------------------------------------------------------------
 */
-void sendMasterInfo(float fvol)
+void sendMasterInfo(void)
     {
-    char charName[32 * 2];
+    char charName[64+1];
     size_t numconv;
+    
+    BOOL mute;
+    float fvol;    
 
-    serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));
-    msg->msg_set_master_vol_prec.volVal = fvol;
-    protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
-    freeProtocolBuf(&msg);
+    deviceData.pEndpointVolume->GetMasterVolumeLevelScalar(&fvol);
+    printf("Current volume as a scalar is: %f\n", fvol);
+    deviceData.pEndpointVolume->GetMute(&mute);
+    if ((fvol != deviceData.prevVolume) || (mute != deviceData.prevMute))
+        {
+        deviceData.update = true;
+        deviceData.prevVolume = fvol;
+        deviceData.prevMute = mute;
+        }
 
-    int size = sizeof(struct msg_set_master_icon) + sizeof(corsair);
-    msg = allocProtocolBuf(MSGTYPE_SET_MASTER_ICON, size);
-    memcpy(msg->msg_set_master_icon.icon, corsair, sizeof(corsair));
-    protocolTxData(msg, size);
-    freeProtocolBuf(&msg);
+    if (deviceData.update)
+        {
+        deviceData.update = false;
 
-    wcstombs_s(&numconv, charName, deviceName, sizeof(charName));
-    charName[sizeof(charName) - 1] = 0;
+        serialProtocol_t *msg = allocProtocolBuf(MSGTYPE_SET_MASTER_VOL_PREC, sizeof(struct msg_set_master_vol_prec));
+        msg->msg_set_master_vol_prec.volVal = fvol * 100;
+        msg->msg_set_master_vol_prec.muteStatus = mute;
+        protocolTxData(msg, sizeof(struct msg_set_master_vol_prec));
+        freeProtocolBuf(&msg);
 
-    int len = sizeof(struct msg_set_master_label) + strlen(charName) + 1;
-    msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, len);
-    memcpy_s(msg->msg_set_master_label.str, strlen(charName) + 1, charName, strlen(charName) + 1);
-    msg->msg_set_master_label.strLen = strlen(charName);
+        int size = sizeof(struct msg_set_master_icon) + sizeof(corsair);
+        msg = allocProtocolBuf(MSGTYPE_SET_MASTER_ICON, size);
+        memcpy(msg->msg_set_master_icon.icon, corsair, sizeof(corsair));
+        protocolTxData(msg, size);
+        freeProtocolBuf(&msg);
 
-    protocolTxData(msg, len);
-    freeProtocolBuf(&msg);
+        wcstombs_s(&numconv, charName, deviceData.deviceName, _countof(charName) - 1);
+        charName[sizeof(charName) - 1] = 0;
 
+        int len = sizeof(struct msg_set_master_label) + strlen(charName) + 1;
+        msg = allocProtocolBuf(MSGTYPE_SET_MASTER_LABEL, len);
+        memcpy_s(msg->msg_set_master_label.str, strlen(charName) + 1, charName, strlen(charName) + 1);
+        msg->msg_set_master_label.strLen = strlen(charName);
+
+        protocolTxData(msg, len);
+        freeProtocolBuf(&msg);
+        }
     }
 
 /*
@@ -870,8 +943,10 @@ void getCmds(uint8_t *pMsgBuf, uint16_t dataLen)
                 {
 
                 }*/
-            printf("New master vol: %d\n", msgPtr->msg_set_master_vol_prec.volVal);
-            
+
+            setMasterVolume(
+                msgPtr->msg_set_master_vol_prec.volVal,
+                msgPtr->msg_set_master_vol_prec.muteStatus);
             break;
                   
         case MSGTYPE_SET_CHANNEL_VOL_PREC:
@@ -884,7 +959,10 @@ void getCmds(uint8_t *pMsgBuf, uint16_t dataLen)
                     }
                 }*/
             
-            setGroupVolume(msgPtr->msg_set_channel_vol_prec.channel, msgPtr->msg_set_channel_vol_prec.volVal);
+            setGroupVolume(
+                msgPtr->msg_set_channel_vol_prec.channel,
+                msgPtr->msg_set_channel_vol_prec.volVal,
+                msgPtr->msg_set_channel_vol_prec.muteStatus);
             break;                
         
         default:
@@ -928,7 +1006,7 @@ bool ctrlChecksum(uint8_t *pMsgBuf)
 ** Sets the referenced groups volume
 **------------------------------------------------------------------------------
 */
-void setGroupVolume(int ch, int percent)
+void setGroupVolume(int ch, int percent, int mute)
     {
     float fvol = percent / 100.0;
     printf("New group %d vol: %d\n", ch, percent);
@@ -939,7 +1017,31 @@ void setGroupVolume(int ch, int percent)
         //do nothing
         }
 
-    LPCGUID pGuid;
     (*i).g.pVolumeControl->SetMasterVolume(fvol, &(*i).g.guid);
     (*i).g.prevVolume = fvol;
+
+    (*i).g.pVolumeControl->SetMute(mute, &(*i).g.guid);
+    (*i).g.prevMute = mute;
+
+    }
+
+
+/*
+**------------------------------------------------------------------------------
+** setMasterVolume:
+**
+** Sets master volume
+**------------------------------------------------------------------------------
+*/
+void setMasterVolume(int percent, int mute)
+    {
+    float fvol = percent / 100.0;
+    printf("New master vol: %d\n", percent, mute);
+
+    deviceData.pEndpointVolume->SetMasterVolumeLevelScalar(fvol, &deviceData.guid);
+    deviceData.prevVolume = fvol;
+
+    deviceData.pEndpointVolume->SetMute(mute, &deviceData.guid);
+    deviceData.prevMute = mute;
+
     }

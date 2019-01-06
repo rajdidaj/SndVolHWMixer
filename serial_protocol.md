@@ -46,17 +46,19 @@ Message types:
 
     MSGTYPE 0: Set master volume %
         PC <-> MCU
-        uint8_t    volVal
+        uint8_t     volVal
+        uint8_t     muteStatus
 
     MSGTYPE 1: Set (custom) master label
         PC -> MCU
-        uint8_t    strLen
-        char[]     str, null terminated, MCU sets the upper limit to the data size
+        uint8_t     strLen
+        char[]      str, null terminated, MCU sets the upper limit to the data size
 
     MSGTYPE 2: Set channel volume %
         PC <-> MCU
         uint8_t     channel
         uint8_t     volVal
+        uint8_t     muteStatus
 
     MSGTYPE 3: Set (custom) channel label
         PC -> MCU
