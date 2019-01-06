@@ -658,7 +658,7 @@ void getLabels(void)
 void sendChannelInfo(int ch, float masterVolume)
     {
     size_t numconv;
-    char charName[64];
+    char charName[64+1];
     uint8_t vol;
     float fvol;
     serialProtocol_t *msg;
@@ -693,7 +693,7 @@ void sendChannelInfo(int ch, float masterVolume)
         protocolTxData(msg, sizeof(struct msg_set_channel_vol_prec));
         freeProtocolBuf(&msg);
 
-        wcstombs_s(&numconv, charName, (*i).g.prettyName, _countof(charName));
+        wcstombs_s(&numconv, charName, (*i).g.prettyName, _countof(charName)-1);
         charName[sizeof(charName) - 1] = 0;
 
         int len = sizeof(struct msg_set_channel_label) + strlen(charName) + 1;
