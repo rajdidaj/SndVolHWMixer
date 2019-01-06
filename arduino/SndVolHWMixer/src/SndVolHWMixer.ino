@@ -75,8 +75,12 @@ const int irqPins[] =
 //This is the volume structure, used to control a specific volume
 typedef struct
 {
+    uint8_t active;
     uint8_t encPin;
-    uint8_t encUpdate;
+
+    uint8_t encWriteUpdate;
+    uint8_t encReadUpdate;
+
     uint8_t update;
     uint8_t scrolling;
     uint8_t volVal;
@@ -155,9 +159,10 @@ void setup()
         chData[i].iconPtr = NULL;
 
         chData[i].encPin = irqPins[i];
-        chData[i].encUpdate = 1;
+        chData[i].encWriteUpdate = 1;
         encoderSetup(i, chData[i].volVal);
         pinMode(irqPins[i], INPUT_PULLUP);
+        chData[i].active = 0;
     }
 
     //Set up the master display
@@ -181,9 +186,10 @@ void setup()
     chData[i].iconPtr = NULL;
 
     chData[i].encPin = irqPins[i];
-    chData[i].encUpdate = 1;
+    chData[i].encWriteUpdate = 1;
     encoderSetup(i, chData[i].volVal);
     pinMode(irqPins[i], INPUT_PULLUP);
+    chData[i].active = 0;
 }
 
 
@@ -252,9 +258,9 @@ void readVols(void)
 
     for(i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
-        if(chData[i].encUpdate)
+        if(chData[i].encReadUpdate)
         {
-            chData[i].encUpdate = 0;
+            chData[i].encReadUpdate = 0;
 
             //Read the encoder
             encoderRead(i, &chData[i]);
@@ -264,9 +270,9 @@ void readVols(void)
     }
 
     i = CHANNEL_MASTER;
-    if(chData[i].encUpdate)
+    if(chData[i].encReadUpdate)
     {
-        chData[i].encUpdate = 0;
+        chData[i].encReadUpdate = 0;
 
         //Read the encoder
         encoderRead(i, &chData[i]);
@@ -287,7 +293,7 @@ int drawScreen(void)
     int i;
     int update = 0;
 
-    if(chData[CHANNEL_MASTER].update)
+    if(chData[CHANNEL_MASTER].update && chData[CHANNEL_MASTER].active)
     {
         update++;
 
@@ -311,7 +317,7 @@ int drawScreen(void)
 
     for (i = CHANNEL_0; i < NUM_CHANNELS; i++)
     {
-        if(chData[i].update)
+        if(chData[i].update && chData[i].active)
         {
             update++;
 
@@ -499,6 +505,7 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
             chData[channel].volVal = msgPtr->msg_set_master_vol_prec.volVal;
             chData[channel].update = 1;
             encoderSet(channel, chData[channel].volVal);
+            chData[channel].active = 1;
         }
         break;
 
@@ -518,6 +525,7 @@ void getCmds(uint8_t *pMsgBuf,  uint16_t dataLen)
                 chData[channel].volVal = msgPtr->msg_set_channel_vol_prec.volVal;
                 chData[channel].update = 1;
                 encoderSet(channel, chData[channel].volVal);
+                chData[channel].active = 1;
             }
         }
         break;
@@ -728,15 +736,23 @@ void pollEncs(void)
 
     for(i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
-        if(!digitalRead(chData[i].encPin))
+        if(!digitalRead(chData[i].encPin) && !chData[i].encWriteUpdate)
         {
-            chData[i].encUpdate = 1;
+            chData[i].encReadUpdate = 1;
+        }
+        else
+        {
+            chData[i].encWriteUpdate = 0;
         }
     }
 
-    if(!digitalRead(chData[CHANNEL_MASTER].encPin))
+    if(!digitalRead(chData[CHANNEL_MASTER].encPin) && !chData[i].encWriteUpdate)
     {
-        chData[CHANNEL_MASTER].encUpdate = 1;
+        chData[CHANNEL_MASTER].encReadUpdate = 1;
+    }
+    else
+    {
+        chData[i].encWriteUpdate = 0;
     }
 }
 
