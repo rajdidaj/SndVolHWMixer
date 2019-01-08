@@ -98,7 +98,7 @@ typedef union
     uint32_t lval;
 }conv_t;
 
-volume_t chData[NUM_CHANNELS+1]   = { 0 };
+volume_t chData[NUM_CHANNELS]   = { 0 };
 unsigned int ledval = 0;
 
 void getCmds(uint8_t *, uint16_t);
@@ -118,6 +118,9 @@ void sendChannelUpdate(int8_t);
 void encoderSetup(int8_t, uint8_t);
 void encoderRead(int8_t, volume_t *);
 void encoderSet(int8_t ch, uint8_t);
+void sleepDisplay(Adafruit_SSD1306*);
+void wakeDisplay(Adafruit_SSD1306*);
+void initChannel(Adafruit_SSD1306 *, int);
 
 /*
 **------------------------------------------------------------------------------
@@ -145,27 +148,7 @@ void setup()
             for (;;)
             Serial.println(F("Channel display allocation failed")); // Don't proceed, loop forever
         }
-
-        // Clear the displays at start
-        chData[i].update = 1;
-        chData[i].display = &display;
-        chData[i].display->clearDisplay();
-        chData[i].display->display();
-
-        chData[i].display->setTextSize(1);      // Normal 1:1 pixel scale
-        chData[i].display->setTextColor(WHITE); // Draw white text
-        chData[i].display->setCursor(0, 0);     // Start at top-left corner
-        chData[i].display->cp437(true);         // Use full 256 char 'Code Page 437' font
-        chData[i].display->display();
-        chData[i].iconPtr = NULL;
-
-        chData[i].encPin = irqPins[i];
-        chData[i].encWriteUpdate = 1;
-        encoderSetup(i, chData[i].volVal);
-        pinMode(irqPins[i], INPUT_PULLUP);
-
-        chData[i].muteStatus = 0;
-        chData[i].active = 0;
+        initChannel(&display, i);
     }
 
     //Set up the master display
@@ -176,25 +159,7 @@ void setup()
         for (;;)
         Serial.println(F("Master display allocation failed")); // Don't proceed, loop forever
     }
-    // Clear the display at start
-    chData[i].update = 1;
-    chData[i].display = &mdisplay;
-    chData[i].display->clearDisplay();
-
-    chData[i].display->setTextSize(1);      // Normal 1:1 pixel scale
-    chData[i].display->setTextColor(WHITE); // Draw white text
-    chData[i].display->setCursor(0, 0);     // Start at top-left corner
-    chData[i].display->cp437(true);         // Use full 256 char 'Code Page 437' font
-    chData[i].display->display();
-    chData[i].iconPtr = NULL;
-
-    chData[i].encPin = irqPins[i];
-    chData[i].encWriteUpdate = 1;
-    encoderSetup(i, chData[i].volVal);
-    pinMode(irqPins[i], INPUT_PULLUP);
-
-    chData[i].muteStatus = 0;
-    chData[i].active = 0;
+    initChannel(&mdisplay, i);
 }
 
 
@@ -317,6 +282,7 @@ int drawScreen(void)
 
         //Update
         selectBus(CHANNEL_MASTER);
+        wakeDisplay(chData[CHANNEL_MASTER].display);
         chData[CHANNEL_MASTER].display->display();
     }
 
@@ -340,6 +306,7 @@ int drawScreen(void)
 
             //Update
             selectBus(i);
+            wakeDisplay(chData[i].display);
             chData[i].display->display();
         }
     }
@@ -722,14 +689,12 @@ void screenSaver(void)
     for ( i = CHANNEL_0 ; i < NUM_CHANNELS ; i++)
     {
         selectBus(i);
-        chData[i].display->clearDisplay();
-        chData[i].display->display();
+        sleepDisplay(chData[i].display);
     }
 
     i = CHANNEL_MASTER;
     selectBus(i);
-    chData[i].display->clearDisplay();
-    chData[i].display->display();
+    sleepDisplay(chData[i].display);
 }
 
 /*
@@ -1045,4 +1010,62 @@ void encoderSet(int8_t ch, uint8_t val)
     Wire.write(tempval.bval[0]); //Write the counter value
 
     Wire.endTransmission();
+}
+
+/*
+**------------------------------------------------------------------------------
+** sleepDisplay:
+**
+** Sets teh display into sleep mode
+**------------------------------------------------------------------------------
+*/
+void sleepDisplay(Adafruit_SSD1306* display)
+{
+  display->ssd1306_command(SSD1306_DISPLAYOFF);
+}
+
+/*
+**------------------------------------------------------------------------------
+** wakeDisplay:
+**
+** Wakes the display from sleep mode
+**------------------------------------------------------------------------------
+*/
+void wakeDisplay(Adafruit_SSD1306* display)
+{
+  display->ssd1306_command(SSD1306_DISPLAYON);
+}
+
+/*
+**------------------------------------------------------------------------------
+** initChannel:
+**
+** Sets up a channel
+**------------------------------------------------------------------------------
+*/
+void initChannel(Adafruit_SSD1306 *dP, int ix)
+{
+    // Clear the displays at start
+    chData[ix].update = 1;
+    chData[ix].display = dP;
+
+    wakeDisplay(chData[ix].display);
+
+    chData[ix].display->clearDisplay();
+    chData[ix].display->display();
+
+    chData[ix].display->setTextSize(1);      // Normal 1:1 pixel scale
+    chData[ix].display->setTextColor(WHITE); // Draw white text
+    chData[ix].display->setCursor(0, 0);     // Start at top-left corner
+    chData[ix].display->cp437(true);         // Use full 256 char 'Code Page 437' font
+    chData[ix].display->display();
+    chData[ix].iconPtr = NULL;
+
+    chData[ix].encPin = irqPins[ix];
+    chData[ix].encWriteUpdate = 1;
+    encoderSetup(ix, chData[ix].volVal);
+    pinMode(irqPins[ix], INPUT_PULLUP);
+
+    chData[ix].muteStatus = 0;
+    chData[ix].active = 0;
 }
