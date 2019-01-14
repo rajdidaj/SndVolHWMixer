@@ -15,8 +15,6 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 
-#include <Encoder.h>
-
 #include "bitmaps.h"
 #include "../../../common/serialprotocol.h"
 
