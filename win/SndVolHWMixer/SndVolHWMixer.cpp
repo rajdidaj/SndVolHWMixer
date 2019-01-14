@@ -404,6 +404,17 @@ int _tmain(int argc, _TCHAR* argv[])
             }
         }
 
+    //Let the controls remain active for another keypress
+    _getch();
+    printf("Still running! Press any key to exit...\n");
+    Sleep(1000);    
+    while (!_kbhit())
+        {
+        // Master volume
+        sendMasterInfo();
+        Sleep(2000);
+        }
+
     //Clean up
     deviceData.pEndpointVolume->Release();
     deviceData.pSessionEnumerator->Release();        
@@ -777,11 +788,11 @@ void sendMasterInfo(void)
     BOOL mute;
     float fvol;    
 
-    deviceData.pEndpointVolume->GetMasterVolumeLevelScalar(&fvol);
-    printf("Current volume as a scalar is: %f\n", fvol);
+    deviceData.pEndpointVolume->GetMasterVolumeLevelScalar(&fvol);    
     deviceData.pEndpointVolume->GetMute(&mute);
     if ((fvol != deviceData.prevVolume) || (mute != deviceData.prevMute))
         {
+        printf("Current volume as a scalar is: %f\n", fvol);
         deviceData.update = true;
         deviceData.prevVolume = fvol;
         deviceData.prevMute = mute;
