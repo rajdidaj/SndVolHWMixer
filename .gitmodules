@@ -1,0 +1,6 @@
+[submodule "arduino/SndVolHWMixer/lib/Adafruit_SSD1306"]
+	path = arduino/SndVolHWMixer/lib/Adafruit_SSD1306
+	url = https://github.com/adafruit/Adafruit_SSD1306.git
+[submodule "arduino/SndVolHWMixer/lib/Adafruit_GFX"]
+	path = arduino/SndVolHWMixer/lib/Adafruit_GFX
+	url = https://github.com/adafruit/Adafruit-GFX-Library.git
