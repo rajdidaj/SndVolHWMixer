@@ -12,5 +12,7 @@ Use either the Arduino IDE or Platform.IO.
 The Arduino program requires the Adafruit GFX library and the Adafruit SSD1306 library.
 
 If using anything else than the Arduino IDE, get the libraries by using git submodule:
+
 git submodule init
+
 git submodule update --remote 
