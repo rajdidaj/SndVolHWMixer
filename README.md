@@ -16,3 +16,6 @@ If using anything else than the Arduino IDE, get the libraries by using git subm
 git submodule init
 
 git submodule update --remote 
+
+
+![Breadboard build](cover.jpg)
